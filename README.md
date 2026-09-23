@@ -69,6 +69,14 @@ under it, the exact command that step replays.
 | 5 | `rewind revert --confirm` | 4 `REVERTED`, 2 `SUBMITTED`, 8 `SKIPPED` |
 | 6 | `rewind diff plan.json` | the verification run: 6 `ALREADY_REVERTED`, 8 `UNCHECKABLE` |
 
+**Or press `Undo it all`** (<kbd>a</kbd>) to run all six half a second apart. That is the
+one-click version of the same thing, and it is what `rewind undo --confirm` does in a single
+command: plan, diff and revert in one pass, still dry-run unless `--confirm` is given. The
+recording predates `undo`, so the terminal pane shows the commands it composes rather than a
+combined report that run never printed. Click it again or press <kbd>Esc</kbd> to stop; the
+steps already run stay on screen. In live mode it asks once, up front, before writing
+anything.
+
 The six small numbered buttons are the same steps, for when a question sends you back one.
 <kbd>t</kbd> opens the terminal pane, <kbd>?</kbd> the help card.
 
@@ -76,7 +84,7 @@ The six small numbered buttons are the same steps, for when a question sends you
 
 ```
 ┌ header ─────────────── mode badge · terminal · ? · start over ───┐
-├ DRIVER ── [ big amber button ] what this step asks + its command ┤
+├ DRIVER ── [ big amber button ] [Undo it all] what this step asks + its command ┤
 ├ query ──── identity / region / what is being replayed            ┤
 ├ command ── $ rewind plan … (the command that just ran)           ┤
 ├ TERMINAL ─ every command's own output, verbatim  (t to toggle)   ┤  ← the receipt
@@ -311,6 +319,7 @@ Left column is what you do, right column is roughly what you say.
 | Time | Do | Say |
 |---|---|---|
 | 0:00 | (page open) | "This is a recording of a real run against a real account. Everything you are about to see came out of that run, and the terminal pane keeps it verbatim." |
+| — | *(if you have 60 seconds, not five: press* **Undo it all** *and narrate the six steps as they land — that is `rewind undo --confirm`, one command)* | |
 | 0:25 | **press 1** | "Nine identities touched this account in half an hour. One of them is the one we care about: 14 changes, 6 resources. And nothing here says what any of those values *was* — CloudTrail records what a call set, never what it replaced." |
 | 1:05 | **press 2** | "Now every field has a before-value with the evidence for it — and 8 of them say question mark, out loud, with the reason." |
 | 1:30 | click an `AUTO` card | "`t3.micro`, MEDIUM, via the creation event — and here is the event id that proves it." |

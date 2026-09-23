@@ -26,6 +26,8 @@
      actually ran. The numbered buttons are the same steps, for jumping back. -->
 <section class="drive">
   <button id="next" class="btn btn-next">Scan CloudTrail</button>
+  <!-- The whole sequence in one click, which is what `rewind undo --confirm` is. -->
+  <button id="auto" class="btn btn-auto" title="Run every step, half a second apart (a)">Undo it all</button>
   <div class="drive-text">
     <div id="nexthint" class="drive-hint">&mdash;</div>
     <div id="nextcmd" class="drive-cmd">&mdash;</div>
@@ -111,6 +113,11 @@
         <code>plan --explain</code>, <code>diff</code>, <code>revert</code> (dry run),
         <code>revert --confirm</code>, <code>diff</code> again to verify.
         <kbd>space</kbd> does the same thing.</li>
+      <li><b>Undo it all</b> (<kbd>a</kbd>) runs all six half a second apart — the one-click
+        version, which is what <code>rewind undo --confirm</code> does in a single command.
+        Click it again or press <kbd>Esc</kbd> to stop. The recording predates
+        <code>undo</code>, so what the terminal pane shows is the commands it composes, each
+        with its own real output.</li>
       <li><b>This is the output of a real run</b> against a real AWS account, not a mock.
         Press <kbd>t</kbd> for the terminal pane: every command's own output, verbatim. If a
         number on screen is not in there, it did not come from rewind. (The transcript is

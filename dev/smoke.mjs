@@ -121,7 +121,7 @@ expect("dots showing only their number", leaked.length, 0);
 // Rules whose absence wrecks the layout without throwing.
 const REQUIRED_CSS = [".dot .tip", ".dot:hover .tip", ".ticks", ".ticks span", ".scrubber",
   ".scrubber .handle", ".state td", ".state tr.state-head td", ".call-chip", ".term-out",
-  ".group-head", ".group-count", "[hidden]"];
+  ".group-head", ".group-count", ".btn-auto", "[hidden]"];
 const missingCss = REQUIRED_CSS.filter((rule) => !css.includes(rule));
 expect("app.css rules present", missingCss.length ? missingCss.join(",") : 0, 0);
 
@@ -150,6 +150,31 @@ const sampled = ["t3.micro", "chn-18af3316d78f", "SUBMITTED", "creation-event",
                  "response-elements", "REVERTED=4  SUBMITTED=2"];
 const absent = sampled.filter((needle) => !term.includes(needle));
 expect("sampled values present in the raw output", absent.length ? absent.join(",") : 0, 0);
+
+/* -- the one-click run ---------------------------------------------------------- */
+
+console.log("\none-click run:");
+const autoButton = () => d.querySelector("#auto");
+autoButton().dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(700);
+console.log("  mid-run  :", t("#auto"), "| step button disabled:", d.querySelector("#next").disabled);
+expect("run reports progress", /^Stop \d\/6$/.test(t("#auto")), true);
+expect("step button locked during the run", d.querySelector("#next").disabled, true);
+autoButton().dispatchEvent(new window.MouseEvent("click", { bubbles: true })); // stop
+await wait(1200);
+console.log("  stopped  :", t("#auto"), "|", (t("#banner") || "").slice(0, 40));
+expect("stopping releases the step button", d.querySelector("#next").disabled, false);
+
+autoButton().dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await wait(6000);
+console.log("  finished :", t("#auto"), "| next:", t("#next"));
+expect("all six commands ran", d.querySelectorAll("#termbody .term-block").length, 6);
+expect("ends on the verification read", t("#next"), "Start over");
+expect(
+  "every revertible field ends restored",
+  [...d.querySelectorAll("#chainlist .chip")].filter((n) => n.textContent === "ALREADY REVERTED").length,
+  6
+);
 
 console.log("\nERRORS:", errors.length?errors:"none");
 process.exitCode = errors.length ? 1 : 0;

@@ -547,3 +547,12 @@ kbd {
   background: #08090c; border: 1px solid var(--line); border-radius: 6px;
   font: 11px/1.6 var(--mono); color: #8d99aa; white-space: pre;
 }
+
+/* The one-click run of the whole sequence. Deliberately quieter than the step button: it is
+   the shortcut, not the thing to press first. */
+.btn-auto {
+  flex: none; font: 500 13px var(--sans);
+  border-color: #4a2f19; background: #211610; color: #ffc08e;
+}
+.btn-auto:hover:not(:disabled) { background: #2e1d12; border-color: #6b4423; color: #ffd7b8; }
+.btn-auto.on { border-color: #5c2a26; background: #241514; color: #ff9b94; }

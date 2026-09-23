@@ -30,6 +30,7 @@ const state = {
   selected: null,
   scrubAt: null, // ms, or null for "now"
   open: {}, // collapsible group key -> open?
+  auto: null, // an in-flight one-click run: {cancelled}
   stage: null,
   log: [], // {command, output} per step, for the terminal pane
 };
@@ -215,6 +216,19 @@ function nextStep() {
 function renderDriver() {
   const { step, index } = nextStep();
   const button = $("#next");
+  const auto = $("#auto");
+  const done = STEPS.findIndex((candidate) => candidate.key === state.stage) + 1;
+  if (state.auto) {
+    auto.textContent = "Stop  " + done + "/" + STEPS.length;
+    auto.classList.add("on");
+    button.disabled = true;
+    $("#nexthint").textContent =
+      "Running every step, " + AUTO_GAP_MS / 1000 + "s apart — this is what `rewind undo --confirm` does in one pass.";
+    $("#nextcmd").textContent = "$ " + (recordedCommand(done - 1) || "");
+    return;
+  }
+  auto.textContent = "Undo it all";
+  auto.classList.remove("on");
   if (step) {
     button.textContent = step.label;
     button.disabled = false;
@@ -230,6 +244,49 @@ function renderDriver() {
     $("#nextcmd").textContent = "";
   }
 }
+
+/* One click for the whole sequence, which is what `rewind undo --confirm` is: plan, diff and
+ * revert in one pass. The recording does not contain an `undo` run - it was added after the
+ * capture - so this replays the commands undo composes, half a second apart, and the terminal
+ * pane still shows each one's own output rather than a combined report this run never printed.
+ *
+ * In live mode the same click would write to real resources, so it asks once, up front. */
+const AUTO_GAP_MS = 500;
+
+async function autoRun() {
+  if (state.auto) {
+    state.auto.cancelled = true;
+    return;
+  }
+  if (state.mode === "live") {
+    const message =
+      "Run the whole sequence, ending in a confirmed revert?\n\n" +
+      "This is LIVE mode: real AWS resources will be modified, with no pause between steps.";
+    if (!window.confirm(message)) return;
+  }
+  const run = { cancelled: false };
+  state.auto = run;
+  renderDriver();
+  try {
+    if (state.stage) await resetDemo();
+    for (const [index, step] of STEPS.entries()) {
+      if (run.cancelled) break;
+      // `confirmRevert` asks first; inside a run the operator has already said yes.
+      await (step.key === "confirm" ? doRevert(true) : step.run());
+      renderDriver();
+      if (index < STEPS.length - 1) await sleep(AUTO_GAP_MS);
+    }
+  } catch (error) {
+    /* already surfaced in the banner */
+  } finally {
+    const cancelled = run.cancelled;
+    state.auto = null;
+    renderDriver();
+    if (cancelled) banner("Stopped. The steps already run are still on screen.");
+  }
+}
+
+const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
 
 async function advance() {
   const { step } = nextStep();
@@ -1186,8 +1243,10 @@ async function boot() {
   }
 
   $("#next").addEventListener("click", () => advance());
+  $("#auto").addEventListener("click", () => autoRun());
   document.querySelectorAll(".act").forEach((button) =>
     button.addEventListener("click", () => {
+      if (state.auto) return;
       const step = STEPS.find((candidate) => candidate.key === button.dataset.act);
       if (step) step.run().catch(() => {});
     })
@@ -1198,13 +1257,16 @@ async function boot() {
     if (target && (target.tagName === "INPUT" || target.tagName === "BUTTON")) return;
     if (key.key === " " || key.key === "ArrowRight") {
       key.preventDefault();
-      advance();
+      if (!state.auto) advance();
+    } else if (key.key === "a") {
+      autoRun();
     } else if (key.key === "?") {
       $("#helpsheet").hidden = !$("#helpsheet").hidden;
     } else if (key.key === "t") {
       toggleTerminal();
     } else if (key.key === "Escape") {
       $("#helpsheet").hidden = true;
+      if (state.auto) state.auto.cancelled = true;
     }
   });
   $("#help").addEventListener("click", () => ($("#helpsheet").hidden = false));
