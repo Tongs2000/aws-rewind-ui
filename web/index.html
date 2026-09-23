@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rewind</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<header class="bar">
+  <div class="brand">
+    <span class="logo">&#9204;</span>
+    <span class="name">rewind</span>
+    <span class="tagline">what the agent changed &middot; what it was before &middot; how to put it back</span>
+  </div>
+  <div class="bar-right">
+    <span id="mode" class="badge badge-mode">&mdash;</span>
+    <button id="help" class="btn btn-ghost" title="What am I looking at? (?)">?</button>
+    <button id="tamper" class="btn btn-ghost" title="Have a third party change a field the agent also touched">Simulate someone else's change</button>
+    <button id="reset" class="btn btn-ghost" title="Reset the demo account and start over">Reset</button>
+  </div>
+</header>
+
+<!-- The demo is this one button, pressed five times. The numbered buttons below it are
+     the same steps out of order, for when a question sends you back a step. -->
+<section class="drive">
+  <button id="next" class="btn btn-next">Scan CloudTrail</button>
+  <div class="drive-text">
+    <div id="nexthint" class="drive-hint">&mdash;</div>
+    <div id="nextcmd" class="drive-cmd">&mdash;</div>
+  </div>
+  <div class="acts" id="acts">
+    <button class="btn act" data-act="scan"><b>1</b> Scan</button>
+    <button class="btn act" data-act="plan"><b>2</b> Resolve</button>
+    <button class="btn act" data-act="diff"><b>3</b> Drift</button>
+    <button class="btn act" data-act="dryrun"><b>4</b> Dry run</button>
+    <button class="btn act" data-act="confirm"><b>5</b> Confirm</button>
+  </div>
+</section>
+
+<section class="query">
+  <label>identity <input id="identity" spellcheck="false" placeholder="perf-agent"></label>
+  <label>window <input id="since" spellcheck="false" placeholder="90m" size="6"></label>
+  <label>region <input id="region" spellcheck="false" placeholder="us-west-1" size="12"></label>
+  <span class="query-note">press <kbd>space</kbd> to advance the demo &middot; <kbd>?</kbd> for help</span>
+</section>
+
+<section class="cmd">
+  <code id="cmdline">$ rewind --help</code>
+  <div class="cmd-right">
+    <span id="cmdstatus" class="muted"></span>
+    <button id="rawtoggle" class="btn btn-ghost">raw JSON</button>
+  </div>
+</section>
+<pre id="raw" class="raw" hidden></pre>
+
+<section id="banner" class="banner" hidden></section>
+
+<section class="stats" id="stats" hidden></section>
+
+<section class="timeline-wrap" id="timelinewrap" hidden>
+  <div class="timeline-head">
+    <h2>Session timeline <span class="drag-hint">&larr; drag anywhere on the track to rewind</span></h2>
+    <div class="scrub-readout">
+      showing state at <span id="scrubtime" class="mono">&mdash;</span>
+      <button id="scrubreset" class="btn btn-ghost">back to now</button>
+    </div>
+  </div>
+  <div class="track-row">
+    <span class="edge-label left">before<br>the session</span>
+    <div id="timeline" class="timeline">
+      <div class="axis"></div>
+      <div id="future" class="future"></div>
+      <div id="scrubber" class="scrubber"><span class="handle"></span></div>
+      <div id="dots" class="dots"></div>
+      <div class="ticks" id="ticks"></div>
+    </div>
+    <span class="edge-label right">now</span>
+  </div>
+  <table class="state" id="state"></table>
+</section>
+
+<main class="split">
+  <section class="chains">
+    <h2 id="chainshead">Changes</h2>
+    <p class="section-note" id="chainsnote">One row per field the identity touched. Click a row to see its evidence.</p>
+    <div id="chainlist" class="chainlist">
+      <p class="empty">Press <b>Scan CloudTrail</b> above to read CloudTrail for this identity and window.</p>
+    </div>
+  </section>
+  <aside class="evidence" id="evidence">
+    <h2>Evidence</h2>
+    <p class="empty">Select a change to see exactly which event proves its previous value.</p>
+  </aside>
+</main>
+
+<div id="helpsheet" class="helpsheet" hidden>
+  <div class="helpcard">
+    <h2>How to drive this</h2>
+    <ol>
+      <li><b>Press the big button five times.</b> It runs, in order: <code>scan</code>,
+        <code>plan</code>, <code>diff</code>, <code>revert</code> (dry run),
+        <code>revert --confirm</code>. <kbd>space</kbd> does the same thing.</li>
+      <li><b>The strip under it</b> is the real command being run. Open <i>raw JSON</i> to
+        show the document every panel is drawn from.</li>
+      <li><b>The timeline is the agent's session</b>, one dot per change. Drag it and the
+        table below shows what each field held at that moment; drag it to the far left for
+        the before-values. It never moves on its own. From step 3 the dots take on each
+        field's state: red conflict, green restored, dashed grey unproven.</li>
+      <li><b>The cards</b> are one per field. Click one: the panel on the right shows the
+        event id that proves its before-value, the change chain, and the API calls a
+        revert would make. Its dots light up on the timeline.</li>
+      <li><b>A dashed grey card</b> means no resolver could prove the old value. Type one
+        into it and the plan re-runs with <code>--set</code>; it comes back blue
+        (<b>ASSERTED</b>), never green.</li>
+      <li><b>Simulate someone else's change</b> (top right) makes a third party edit a
+        field behind the plan's back, so step 3 finds a <b>CONFLICT</b> and step 4 refuses
+        to overwrite it.</li>
+    </ol>
+    <button id="helpclose" class="btn">Got it</button>
+  </div>
+</div>
+
+<footer class="actions" id="actions" hidden>
+  <div class="revert-left">
+    <div class="revert-summary" id="revertsummary"></div>
+    <!-- The revert is a list of calls in execution order, not a moment in time, so it
+         lives here rather than on the timeline. -->
+    <div class="revert-calls" id="revertcalls"></div>
+  </div>
+  <div class="revert-buttons">
+    <button id="dryrun" class="btn">Dry run</button>
+    <button id="confirm" class="btn btn-danger">Confirm revert</button>
+  </div>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
