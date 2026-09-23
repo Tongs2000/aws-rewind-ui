@@ -168,11 +168,30 @@ kbd {
 #cmdline::-webkit-scrollbar { display: none; }
 .cmd-right { display: flex; align-items: center; gap: 8px; flex: none; }
 #cmdstatus { font-size: 11.5px; }
-.raw {
-  margin: 0; padding: 14px 20px; max-height: 320px; overflow: auto;
-  background: #08090c; border-bottom: 1px solid var(--line);
-  font: 11.5px/1.6 var(--mono); color: #8d99aa;
+/* -- terminal pane: the receipt -------------------------------------------- */
+
+.terminal {
+  background: #07080b; border-bottom: 1px solid var(--line);
+  max-height: 46vh; display: flex; flex-direction: column;
 }
+.term-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 20px; border-bottom: 1px solid var(--line-soft);
+  font: 10.5px var(--sans); letter-spacing: .08em; text-transform: uppercase;
+  color: var(--ink-faint); flex: none;
+}
+.term-body { overflow: auto; padding: 10px 20px 16px; }
+.term-empty { font: 12px var(--mono); color: var(--ink-faint); padding: 6px 0; }
+.term-block { margin-bottom: 14px; }
+.term-cmd { display: flex; gap: 8px; font: 12.5px var(--mono); padding: 4px 0; }
+.term-prompt { color: var(--high); flex: none; }
+.term-text { color: #cdd6e2; }
+.term-out {
+  margin: 4px 0 0; white-space: pre; overflow-x: auto;
+  font: 11.5px/1.55 var(--mono); color: #8d99aa;
+}
+.term-latest .term-text { color: var(--accent); }
+.btn-ghost.on { color: var(--accent); background: #211610; }
 
 .banner {
   padding: 10px 20px; font-size: 12.5px; line-height: 1.55;
@@ -250,6 +269,10 @@ kbd {
 .dot.m-conflict { border-color: var(--bad); background: #2a1210; color: #ff9b94; }
 .dot.m-restored { border-color: var(--high); background: #0f2013; color: #8fe0a6; }
 .dot.m-unproven { border-style: dashed; border-color: #4b5462; }
+.dot.m-failed { border-color: var(--bad); background: #2a1210; color: #ff9b94; }
+/* Filtered out by a chip: still there, still numbered, just out of the way. */
+.dot.filtered { opacity: .16; }
+.dots.focused .dot.filtered { opacity: .12; }
 
 /* The axis carries nothing but the numbers. Every detail - timestamp, event name,
    resource, field, value - waits in a tooltip until the pointer asks for it. */
@@ -358,12 +381,15 @@ kbd {
 .chip.MEDIUM { color: var(--medium); border-color: #4e3a17; background: #211a0e; }
 .chip.ASSERTED { color: var(--asserted); border-color: #23405f; background: #111a26; }
 .chip.UNKNOWN { color: var(--unknown); border-color: #333a44; background: #171a1f; }
+.chip.AUTO { color: var(--high); border-color: #23512f; background: #10200f; }
+.chip.MANUAL, .chip.RECONSTRUCTED { color: var(--medium); border-color: #4e3a17; background: #211a0e; }
+.chip.DISCOVERED { color: var(--unknown); border-color: #333a44; background: #171a1f; }
 .chip.src { color: var(--ink-dim); border-color: var(--line); background: #14181d; text-transform: none; letter-spacing: 0; }
 .chip.steps { color: var(--ink-faint); border-color: var(--line); background: none; text-transform: none; }
 .chip.v-CONFLICT, .chip.v-FAILED, .chip.v-UNREADABLE { color: var(--bad); border-color: #5c2a26; background: #1f1211; }
 .chip.v-REVERTED, .chip.v-ALREADY_REVERTED, .chip.v-ALREADY_AT_ORIGINAL { color: var(--high); border-color: #23512f; background: #10200f; }
 .chip.v-REVERTIBLE, .chip.v-DRY_RUN, .chip.v-SUBMITTED { color: var(--accent); border-color: #4a2f19; background: #211610; }
-.chip.v-UNPROVEN, .chip.v-SKIPPED { color: var(--unknown); border-color: #333a44; background: #171a1f; }
+.chip.v-UNPROVEN, .chip.v-SKIPPED, .chip.v-UNCHECKABLE { color: var(--unknown); border-color: #333a44; background: #171a1f; }
 
 .supply { grid-column: 1 / -1; margin-top: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .supply input {
@@ -473,4 +499,51 @@ kbd {
 @media (max-width: 1000px) {
   .split { grid-template-columns: 1fr; }
   .evidence { border-left: none; border-top: 1px solid var(--line); position: static; min-height: 0; }
+}
+
+/* -- collapsible groups over the card list --------------------------------- */
+
+.group { margin-bottom: 8px; }
+.group-head {
+  display: flex; align-items: baseline; gap: 9px; width: 100%;
+  background: none; border: none; border-bottom: 1px solid var(--line-soft);
+  padding: 7px 2px; cursor: pointer; text-align: left;
+  font: 12px var(--sans); color: var(--ink-dim);
+}
+.group-head:hover { color: var(--ink); }
+.caret { color: var(--ink-faint); font-size: 10px; flex: none; }
+.group-title { font-weight: 600; letter-spacing: .04em; text-transform: uppercase; font-size: 11px; }
+.group-count {
+  font: 600 10.5px/1 var(--mono); color: var(--ink-dim);
+  border: 1px solid var(--line); border-radius: 10px; padding: 3px 7px; flex: none;
+}
+.group-note {
+  font-size: 11.5px; color: var(--ink-faint); min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.group.open > .group-head { color: var(--ink); border-bottom-color: var(--line); }
+.group.open > .group-head .group-title { color: var(--accent); }
+.group-body { display: flex; flex-direction: column; gap: 8px; padding: 10px 0 4px; }
+
+/* -- identity rows (step 1) ------------------------------------------------ */
+
+.chain.identity .events {
+  font: 11.5px var(--mono); color: var(--ink-faint); margin-top: 3px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.chain.identity.primary { border-color: #4a2f19; background: #1a1512; }
+.chain.identity.primary .who b { color: var(--accent); }
+
+/* -- per-field state on a card --------------------------------------------- */
+
+.chain.m-failed { border-color: #5c2a26; }
+.chain.m-restored .before { color: var(--high); }
+.chain .meta .hint.bad { color: #ff9b94; }
+.state td.val.bad, .state td.now.bad { color: var(--bad); }
+
+/* The CLI's own words for the selected field, so the panel can be checked. */
+.ev-verbatim {
+  margin: 0; padding: 10px 12px; overflow-x: auto;
+  background: #08090c; border: 1px solid var(--line); border-radius: 6px;
+  font: 11px/1.6 var(--mono); color: #8d99aa; white-space: pre;
 }

@@ -1,12 +1,13 @@
 /* rewind-ui
  *
- * Every number, value and event id on screen comes from a `rewind ... --output json`
- * document. This file only lays those documents out; it never derives a previous value,
- * because the one rule the tool is built on is that an unproven value stays unproven.
+ * Every number, value and event id on screen is read out of a real `rewind` run. In demo
+ * mode the server replays a recorded session against a real AWS account and hands back
+ * both the parsed result and the command's verbatim output; the terminal pane shows that
+ * output unedited, and the panels are a rendering of it and nothing else.
  *
- * The one thing computed here is the scrubber: the value a field held at time T is the
+ * The one thing computed here is the playhead: the value a field held at time T is the
  * `after` of the last change at or before T, or the chain's anchor when T predates the
- * first change. That is not an inference - it is exactly the chain the plan hands over.
+ * first change. That is not an inference - it is the chain the plan hands over.
  */
 
 const $ = (sel) => document.querySelector(sel);
@@ -17,20 +18,21 @@ const el = (tag, cls, text) => {
   return node;
 };
 
+const UNPROVEN = "?";
+
 const state = {
   mode: "demo",
+  recorded: null,
   scan: null,
   plan: null,
   diff: null,
   revert: null,
-  account: null,
   selected: null,
   scrubAt: null, // ms, or null for "now"
-  asserted: {}, // chainId -> value supplied by the operator
+  open: {}, // collapsible group key -> open?
   stage: null,
+  log: [], // {command, output} per step, for the terminal pane
 };
-
-const UNPROVEN = "?";
 
 // -- api ---------------------------------------------------------------------
 
@@ -49,15 +51,18 @@ async function call(route, body) {
     banner("could not reach the server: " + error.message, true);
     throw error;
   }
-  if (data.argv) $("#cmdline").textContent = "$ " + data.argv.join(" ");
-  $("#raw").textContent = JSON.stringify(data.payload ?? data, null, 2);
+  const command = (data.argv || []).join(" ");
+  if (command) $("#cmdline").textContent = "$ " + command;
   if (!response.ok) {
     $("#cmdstatus").textContent = "exit " + (data.exitCode ?? "?");
     banner(data.error || "the command failed", true);
     throw new Error(data.error || "command failed");
   }
   $("#cmdstatus").textContent = "exit " + data.exitCode;
-  if (data.account) state.account = data.account;
+  if (data.raw) {
+    state.log.push({ command, output: data.raw });
+    renderTerminal();
+  }
   return data;
 }
 
@@ -72,14 +77,58 @@ function banner(html, isError) {
   node.innerHTML = html;
 }
 
-// -- acts --------------------------------------------------------------------
+function esc(text) {
+  return String(text ?? "").replace(/[&<>"]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])
+  );
+}
 
-function query() {
-  return {
-    identity: $("#identity").value,
-    since: $("#since").value,
-    region: $("#region").value,
-  };
+// -- the driver --------------------------------------------------------------
+
+/* One button, pressed six times, is the whole demo: the six commands the recorded session
+ * actually ran, in order. Each entry says what the press asks and what it runs. */
+const STEPS = [
+  {
+    key: "scan",
+    label: "Scan CloudTrail",
+    hint: "Who changed anything in this window? One row per identity, most actionable first.",
+    run: () => doScan(),
+  },
+  {
+    key: "plan",
+    label: "Resolve before-values",
+    hint: "For one identity: every field it touched, what each held beforehand, and the evidence for it.",
+    run: () => doPlan(),
+  },
+  {
+    key: "diff",
+    label: "Check drift",
+    hint: "Read each field's live value now. Has anything moved since the plan was made?",
+    run: () => doDiff(),
+  },
+  {
+    key: "dryrun",
+    label: "Revert — dry run",
+    hint: "The exact API calls a revert would make, newest change first. Nothing is called.",
+    run: () => doRevert(false),
+  },
+  {
+    key: "confirm",
+    label: "Confirm revert",
+    hint: "Apply it. Each field is re-checked immediately before it is touched, and read back after.",
+    run: () => confirmRevert(),
+  },
+  {
+    key: "verify",
+    label: "Verify",
+    hint: "Run diff once more: what actually landed, and what still needs a human.",
+    run: () => doDiff(),
+  },
+];
+
+function recordedCommand(index) {
+  const commands = (state.recorded && state.recorded.commands) || [];
+  return commands[index] || "";
 }
 
 function markStage(stage) {
@@ -87,80 +136,38 @@ function markStage(stage) {
   const reached = STEPS.findIndex((step) => step.key === stage);
   document.querySelectorAll(".act").forEach((button) => {
     const index = STEPS.findIndex((step) => step.key === button.dataset.act);
-    button.classList.toggle("done", index <= reached && reached >= 0);
+    button.classList.toggle("done", reached >= 0 && index <= reached);
     button.classList.toggle("current", index === reached + 1);
   });
   renderDriver();
 }
 
-/* -- the driver ------------------------------------------------------------
- * One button, pressed five times, is the whole demo. Each entry says what the press
- * runs, what to say while it runs, and the command it maps to. */
-
-const STEPS = [
-  {
-    key: "scan",
-    label: "Scan CloudTrail",
-    hint: "What did this identity change? CloudTrail records the value each call set — and nothing about what it replaced.",
-    cmd: "rewind scan --identity … --since 90m",
-    run: () => doScan(),
-  },
-  {
-    key: "plan",
-    label: "Resolve before-values",
-    hint: "Chain every field back to the value it held before the session's first change, and show the evidence for each one.",
-    cmd: "rewind plan --identity … --since 90m -o plan.json",
-    run: () => doPlan(),
-  },
-  {
-    key: "diff",
-    label: "Check drift",
-    hint: "Ask AWS what each field holds right now. Has anything moved since the plan was made?",
-    cmd: "rewind diff plan.json --blame",
-    run: () => doDiff(),
-  },
-  {
-    key: "dryrun",
-    label: "Revert — dry run",
-    hint: "The exact API calls a revert would make, in order. Nothing is called.",
-    cmd: "rewind revert plan.json",
-    run: () => doRevert(false),
-  },
-  {
-    key: "confirm",
-    label: "Confirm revert",
-    hint: "Apply it: newest change first, each one verified by a read-back. The only mutating path in the tool.",
-    cmd: "rewind revert plan.json --confirm",
-    run: () => confirmRevert(),
-  },
-];
-
 function nextStep() {
   const reached = STEPS.findIndex((step) => step.key === state.stage);
-  return STEPS[reached + 1] || null;
+  return { step: STEPS[reached + 1] || null, index: reached + 1 };
 }
 
 function renderDriver() {
-  const step = nextStep();
+  const { step, index } = nextStep();
   const button = $("#next");
   if (step) {
     button.textContent = step.label;
     button.disabled = false;
     button.classList.toggle("btn-final", step.key === "confirm");
     $("#nexthint").textContent = step.hint;
-    $("#nextcmd").textContent = "$ " + step.cmd;
+    $("#nextcmd").textContent = "$ " + (recordedCommand(index) || "rewind " + step.key);
   } else {
-    button.textContent = "Reset and run it again";
+    button.textContent = "Start over";
     button.disabled = false;
     button.classList.remove("btn-final");
     $("#nexthint").textContent =
-      "Done: the account is back where it was before the session. Read-only by default, one mutating path, no infrastructure, $0.";
+      "That is the whole run: read-only by default, one mutating path, no infrastructure, $0 on the bill.";
     $("#nextcmd").textContent = "";
   }
 }
 
 async function advance() {
-  const step = nextStep();
+  const { step } = nextStep();
   try {
     if (step) await step.run();
     else await resetDemo();
@@ -169,99 +176,106 @@ async function advance() {
   }
 }
 
+// -- steps -------------------------------------------------------------------
+
 async function doScan() {
-  const result = await call("/api/scan", query());
+  const result = await call("/api/scan", {});
   state.scan = result.payload;
   state.plan = state.diff = state.revert = null;
   state.selected = null;
   state.scrubAt = null;
   markStage("scan");
   const scan = state.scan;
-  let note =
-    "CloudTrail recorded <b>" +
-    scan.changes.length +
-    "</b> field change(s) by this identity. Each row shows only the value the call " +
-    "<i>set</i> - the previous value is not in the record. That is what step 2 resolves.";
-  if (scan.otherIdentities && scan.otherIdentities.length) {
-    note +=
-      "<ul><li>other identities active in this window: " +
-      scan.otherIdentities.map(esc).join(", ") +
-      "</li></ul>";
-  }
-  banner(note);
+  const mine = scan.identities[0];
+  banner(
+    "<b>" +
+      esc(scan.identitiesText || scan.identities.length + " identities") +
+      "</b> in this window. Top row is the one we are chasing: <b>" +
+      esc(mine.identity) +
+      "</b>, " +
+      mine.changes +
+      " change(s) across " +
+      mine.resources +
+      " resource(s), " +
+      esc(mine.pluginBacked) +
+      " of which <b>rewind revert</b> could execute. Nothing here says what any value " +
+      "<i>was</i> — that is the next step."
+  );
   render();
 }
 
 async function doPlan() {
-  const sets = Object.entries(state.asserted).map(([selector, value]) => ({ selector, value }));
-  const result = await call("/api/plan", { ...query(), sets });
+  const result = await call("/api/plan", {});
   state.plan = result.payload;
   state.diff = state.revert = null;
   state.scrubAt = null;
   markStage("plan");
-  const warnings = state.plan.warnings || [];
+  const stats = state.plan.stats;
   banner(
-    "Previous values resolved from evidence only. <b>" +
-      state.plan.stats.revertible +
-      " of " +
-      state.plan.stats.chains +
-      "</b> field(s) can be put back." +
-      (warnings.length ? "<ul>" + warnings.map((w) => "<li>" + esc(w) + "</li>").join("") + "</ul>" : "")
+    "<b>" +
+      esc(stats.revertibleText) +
+      "</b>. Confidence: " +
+      Object.entries(stats.byConfidence)
+        .map(([level, count]) => count + " " + level)
+        .join(", ") +
+      ". Every before-value below is evidence or a question mark — never a guess." +
+      ((state.plan.warnings || []).length
+        ? "<ul>" + state.plan.warnings.map((w) => "<li>" + esc(w) + "</li>").join("") + "</ul>"
+        : "")
   );
   render();
 }
 
 async function doDiff() {
-  if (!state.plan) await doPlan();
-  const result = await call("/api/diff", { blame: true });
+  const result = await call("/api/diff", {});
   state.diff = result.payload;
-  markStage("diff");
+  markStage(state.revert && !state.revert.dryRun ? "verify" : "diff");
   const summary = state.diff.summary || {};
+  const parts = Object.entries(summary).map(([verdict, count]) => count + " " + verdict);
   banner(
-    state.diff.driftFree
-      ? "Nothing has drifted since the plan was made: every field still holds the value the session left. The plan is safe to apply."
-      : "<b>" + (summary.CONFLICT || 0) + " conflict(s)</b>: someone else changed these fields after the session, so reverting would overwrite their work.",
-    !state.diff.driftFree
+    "<b>" +
+      esc(state.diff.driftText) +
+      "</b><br>" +
+      parts.join(" · ") +
+      (summary.UNCHECKABLE
+        ? " — UNCHECKABLE means no plugin knows which Describe call reads that field, so drift cannot be checked. The change is still recorded."
+        : "")
   );
   render();
 }
 
 async function doRevert(confirm) {
-  if (!state.plan) await doPlan();
   const result = await call("/api/revert", { confirm: !!confirm });
   state.revert = result.payload;
   markStage(confirm ? "confirm" : "dryrun");
   const summary = state.revert.summary || {};
+  const parts = Object.entries(summary).map(([outcome, count]) => count + " " + outcome);
   if (confirm) {
-    const done = (summary.REVERTED || 0) + (summary.SUBMITTED || 0);
     banner(
       "<b>" +
-        done +
-        " field(s) restored</b>, " +
-        (summary.SKIPPED || 0) +
-        " skipped, " +
-        (summary.FAILED || 0) +
-        " failed. Newest change first, each one verified by a read-back." +
-        (state.mode === "demo" ? " (demo account, in memory)" : ""),
+        parts.join(" · ") +
+        "</b>. Newest change first, each verified by a read-back." +
+        (state.revert.attention.length
+          ? "<ul>" +
+            state.revert.attention.map((row) => "<li>" + esc(row) + "</li>").join("") +
+            "</ul>"
+          : ""),
       (summary.FAILED || 0) > 0
     );
   } else {
-    banner(
-      "Dry run: <b>nothing was called</b>. The exact API calls are listed per field - select one to read them."
-    );
+    banner("Dry run: <b>nothing was called</b>. " + parts.join(" · ") + ".");
   }
   render();
 }
 
-/** The confirm step, with the same prompt whether it is driven or clicked. */
 async function confirmRevert() {
-  if (!state.plan) await doPlan();
-  const stats = state.plan.stats;
   const message =
     "Apply the revert?\n\n" +
-    stats.revertible +
-    " field(s) will be written, newest change first." +
-    (state.mode === "live" ? "\n\nThis is LIVE mode: real AWS resources will be modified." : "");
+    (state.plan ? state.plan.stats.revertible : "?") +
+    " field(s) would be written, newest change first." +
+    (state.mode === "live"
+      ? "\n\nThis is LIVE mode: real AWS resources will be modified."
+      : "\n\nDemo mode: this replays a recorded run. Nothing is called now.");
   if (window.confirm(message)) await doRevert(true);
 }
 
@@ -274,27 +288,137 @@ async function resetDemo() {
     revert: null,
     selected: null,
     scrubAt: null,
-    asserted: {},
+    open: {},
+    log: [],
   });
   markStage(null);
-  banner("Demo account reset. Press <b>Scan CloudTrail</b> to start over.");
+  renderTerminal();
+  banner("Rewound to the start. Press <b>Scan CloudTrail</b>.");
   render();
 }
 
-// -- render ------------------------------------------------------------------
+// -- helpers -----------------------------------------------------------------
 
-function esc(text) {
-  return String(text ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const shortResource = (id) =>
+  id && id.length > 30 ? id.slice(0, 14) + "…" + id.slice(-12) : id || "";
+const timeOf = (iso) => new Date(iso).getTime();
+const clock = (ms) => new Date(ms).toISOString().slice(11, 19);
+const display = (value) => (value === null || value === undefined ? UNPROVEN : String(value));
+
+function diffEntry(chainId) {
+  if (!state.diff) return null;
+  return (state.diff.entries || []).find((entry) => entry.chainId === chainId) || null;
 }
 
-const shortResource = (id) => (id.length > 26 ? id.slice(0, 12) + "…" + id.slice(-8) : id);
-const timeOf = (iso) => new Date(iso).getTime();
-const clock = (ms) =>
-  new Date(ms).toISOString().slice(11, 19);
+function revertResult(chainId) {
+  if (!state.revert) return null;
+  return (state.revert.results || []).find((result) => result.chainId === chainId) || null;
+}
 
-function display(value) {
-  if (value === null || value === undefined) return UNPROVEN;
-  return String(value);
+/** Marker state for a chain, from the same single status the rest of the UI uses. */
+function chainMood(chain) {
+  const status = chainStatus(chain);
+  if (status === "FAILED") return "failed";
+  if (["REVERTED", "SUBMITTED", "ALREADY_REVERTED", "ALREADY_AT_ORIGINAL"].includes(status)) {
+    return "restored";
+  }
+  if (["CONFLICT", "UNREADABLE"].includes(status)) return "conflict";
+  if (chain.confidence === "UNKNOWN") return "unproven";
+  if (chain.confidence === "ASSERTED") return "asserted";
+  return "";
+}
+
+/* One status per field, from whichever step read the field last - by the clock, not by which
+ * command it was. That matters at step 6: an asynchronous field the revert could only report
+ * as SUBMITTED has since settled, and the verification diff is the newer read, so it wins and
+ * the field reads ALREADY_REVERTED. Everything the UI groups, dims or colours keys off this,
+ * so the list, the timeline, the table and the footer cannot disagree about a field. */
+function diffIsNewer() {
+  if (!state.diff || !state.revert) return !!state.diff;
+  const wroteAt = state.revert.startedAt ? timeOf(state.revert.startedAt) : 0;
+  const readAt = state.diff.checkedAt ? timeOf(state.diff.checkedAt) : 0;
+  return readAt > wroteAt;
+}
+
+function latestRead(chainId) {
+  const result = revertResult(chainId);
+  const entry = diffEntry(chainId);
+  if (!result) return { entry };
+  if (!entry) return { result };
+  return diffIsNewer() ? { entry, result } : { result, entry };
+}
+
+function chainStatus(chain) {
+  const latest = latestRead(chain.chainId);
+  // Key order is the precedence: whichever read is newer was put first.
+  for (const key of Object.keys(latest)) {
+    if (key === "result" && latest.result) return latest.result.outcome;
+    if (key === "entry" && latest.entry && latest.entry.verdict) return latest.entry.verdict;
+  }
+  return chain.capability;
+}
+
+/* The statuses worth a presenter's time: something can be done, was done, or went wrong.
+ * Everything else is a change rewind can only report, and is collapsed out of the way. */
+const ACTIONABLE = new Set([
+  "AUTO",
+  "MANUAL",
+  "RECONSTRUCTED",
+  "REVERTIBLE",
+  "DRY_RUN",
+  "REVERTED",
+  "SUBMITTED",
+  "ALREADY_REVERTED",
+  "ALREADY_AT_ORIGINAL",
+  "FAILED",
+  "CONFLICT",
+]);
+
+/** Why a collapsed group exists, in the CLI's terms. */
+const GROUP_NOTE = {
+  SKIPPED: "the previous value is not proven, so there is nothing to restore",
+  DISCOVERED: "CloudTrail recorded the change but not the value it set",
+  UNCHECKABLE: "no plugin knows which Describe call reads this field, so drift cannot be checked",
+  UNREADABLE: "the resource cannot be read any more — it is gone",
+  UNPROVEN: "the pre-session value is not proven",
+};
+
+function chainGroups() {
+  const chains = state.plan ? state.plan.chains : [];
+  const actionable = [];
+  const rest = new Map();
+  chains.forEach((chain) => {
+    const status = chainStatus(chain);
+    if (ACTIONABLE.has(status)) {
+      actionable.push(chain);
+      return;
+    }
+    if (!rest.has(status)) rest.set(status, []);
+    rest.get(status).push(chain);
+  });
+  const groups = [];
+  if (actionable.length) {
+    groups.push({ key: "actionable", title: "Revertible & reverted", chains: actionable, open: true });
+  }
+  [...rest.entries()]
+    .sort((a, b) => b[1].length - a[1].length)
+    .forEach(([status, group]) =>
+      groups.push({
+        key: status,
+        title: status.replace(/_/g, " ").toLowerCase(),
+        note: GROUP_NOTE[status] || "",
+        chains: group,
+        open: false,
+      })
+    );
+  return groups;
+}
+
+/** A field is dimmed on the timeline while its group is collapsed. */
+function isVisible(chain) {
+  const group = chainGroups().find((candidate) => candidate.chains.includes(chain));
+  if (!group) return true;
+  return state.open[group.key] ?? group.open;
 }
 
 function render() {
@@ -305,7 +429,35 @@ function render() {
   renderActions();
 }
 
-/* -- stats ----------------------------------------------------------------- */
+// -- terminal ----------------------------------------------------------------
+
+/* The verbatim output of every command, in the order they ran. This is the receipt: if a
+ * number on screen is not in here, it did not come from a rewind run. */
+function renderTerminal() {
+  const host = $("#termbody");
+  host.innerHTML = "";
+  if (!state.log.length) {
+    host.appendChild(el("div", "term-empty", "No command has run yet."));
+  }
+  state.log.forEach((entry, index) => {
+    const block = el("div", "term-block");
+    const head = el("div", "term-cmd");
+    head.appendChild(el("span", "term-prompt", "$"));
+    head.appendChild(el("span", "term-text", entry.command));
+    block.appendChild(head);
+    block.appendChild(el("pre", "term-out", entry.output));
+    if (index === state.log.length - 1) block.classList.add("term-latest");
+    host.appendChild(block);
+  });
+  $("#termcount").textContent = state.log.length
+    ? state.log.length + " command" + (state.log.length === 1 ? "" : "s")
+    : "";
+  // Keep the newest output in view without yanking the page around.
+  const latest = host.querySelector(".term-latest");
+  if (latest && !$("#terminal").hidden) latest.scrollIntoView({ block: "nearest" });
+}
+
+// -- stats -------------------------------------------------------------------
 
 function renderStats() {
   const host = $("#stats");
@@ -313,98 +465,96 @@ function renderStats() {
   const cells = [];
 
   if (state.plan) {
-    const s = state.plan.stats;
-    cells.push(["changes", s.changes, ""]);
-    cells.push(["fields", s.chains, ""]);
-    cells.push(["revertible", s.revertible + " <small>/ " + s.chains + "</small>", ""]);
-    const by = s.byConfidence || {};
-    ["HIGH", "MEDIUM", "ASSERTED", "UNKNOWN"].forEach((level) => {
-      if (by[level]) cells.push([level.toLowerCase(), by[level], "c-" + level.toLowerCase()]);
+    const stats = state.plan.stats;
+    cells.push(["changes", stats.changes, ""]);
+    cells.push(["fields", stats.chains, ""]);
+    // `auto-revertible`, not `revertible`: the diff below reports its own REVERTIBLE
+    // verdict, and two tiles with the same word would read as the same number twice.
+    cells.push([
+      "auto-revertible",
+      stats.revertible + " <small>/ " + stats.chains + "</small>",
+      "c-high",
+    ]);
+    Object.entries(stats.byConfidence).forEach(([level, count]) => {
+      if (count) cells.push([level.toLowerCase(), count, "c-" + level.toLowerCase()]);
     });
-    cells.push(["events read", s.eventsConsulted, ""]);
-    cells.push(["cost", "$0", ""]);
   } else if (state.scan) {
-    cells.push(["events in window", state.scan.eventsInWindow, ""]);
-    cells.push(["by this identity", state.scan.eventsForIdentity, ""]);
-    cells.push(["field changes", state.scan.changes.length, ""]);
-    cells.push(["previous values known", "0", "c-unknown"]);
+    const mine = state.scan.identities[0] || {};
+    cells.push(["identities", state.scan.identities.length, ""]);
+    cells.push(["top identity changes", mine.changes || 0, ""]);
+    cells.push(["resources", mine.resources || 0, ""]);
+    cells.push(["before-values known", "0", "c-unknown"]);
   }
 
-  if (state.diff) {
-    const conflicts = state.diff.summary.CONFLICT || 0;
-    cells.push(["conflicts", conflicts, conflicts ? "c-bad" : "c-high"]);
+  // Only the tiles a presenter reads out. The counts for the collapsed groups are on the
+  // group headers themselves, so repeating them here would just make a wall of numbers.
+  const LOUD = {
+    CONFLICT: "c-bad",
+    UNREADABLE: "c-bad",
+    FAILED: "c-bad",
+    ALREADY_REVERTED: "c-high",
+    REVERTED: "c-high",
+    SUBMITTED: "c-medium",
+  };
+  const tile = ([key, count]) => {
+    if (!count || !(key in LOUD)) return;
+    cells.push([key.toLowerCase().replace(/_/g, " "), count, LOUD[key]]);
+  };
+  // Only the newer read's counts, for the same reason `latestRead` exists: after the
+  // verification diff, "submitted 2" beside "already reverted 6" would be two answers to one
+  // question. The step that reported it is still in the banner and in the terminal pane.
+  if (diffIsNewer()) {
+    Object.entries(state.diff.summary).forEach(tile);
+  } else {
+    if (state.diff) Object.entries(state.diff.summary).forEach(tile);
+    if (state.revert && !state.revert.dryRun) Object.entries(state.revert.summary).forEach(tile);
   }
-  if (state.revert && !state.revert.dryRun) {
-    const s = state.revert.summary;
-    cells.push(["restored", (s.REVERTED || 0) + (s.SUBMITTED || 0), "c-high"]);
-    if (s.FAILED) cells.push(["failed", s.FAILED, "c-bad"]);
-  }
+  if (cells.length) cells.push(["cost", "$0", ""]);
 
   host.hidden = cells.length === 0;
   cells.forEach(([key, value, cls]) => {
     const cell = el("div", "stat " + (cls || ""));
     cell.appendChild(el("div", "k", key));
-    const v = el("div", "v");
-    v.innerHTML = String(value);
-    cell.appendChild(v);
+    const node = el("div", "v");
+    node.innerHTML = String(value);
+    cell.appendChild(node);
     host.appendChild(cell);
   });
 }
 
-/* -- timeline -------------------------------------------------------------- */
+// -- timeline ----------------------------------------------------------------
+
+/* The track is the identity's session and nothing else: one dot per change, on a real time
+ * axis, left edge = the whole minute before the first change. The playhead never moves on
+ * its own. The revert is a list of calls in the footer, because it is not a moment here. */
 
 function sessionEvents() {
-  if (state.plan) {
-    const rows = [];
-    state.plan.chains.forEach((chain) =>
-      chain.changes.forEach((change) =>
-        rows.push({
-          at: timeOf(change.eventTime),
-          eventName: change.eventName,
-          resourceId: chain.resourceId,
-          field: chain.field,
-          after: change.after,
-          chainId: chain.chainId,
-        })
-      )
-    );
-    return rows.sort((a, b) => a.at - b.at);
-  }
-  if (state.scan) {
-    return state.scan.changes
-      .map((change) => ({
+  if (!state.plan) return [];
+  const rows = [];
+  state.plan.chains.forEach((chain) =>
+    chain.changes.forEach((change) =>
+      rows.push({
         at: timeOf(change.eventTime),
         eventName: change.eventName,
-        resourceId: change.resourceId,
-        field: change.field,
-        after: change.setTo,
-        chainId: null,
-      }))
-      .sort((a, b) => a.at - b.at);
-  }
-  return [];
+        chain,
+        change,
+      })
+    )
+  );
+  return rows.sort((a, b) => a.at - b.at);
 }
 
 function windowBounds() {
   const events = sessionEvents();
-  const source = state.plan || state.scan;
-  if (!events.length || !source) return null;
-  // The axis starts on the whole minute before the first change, so the tick labels read
-  // 17:20:00 / 17:22:30 / … rather than an arbitrary 17:20:59, and the first dot is not
-  // clipped by the left edge. Anywhere left of `firstChange` is "before the session".
+  if (!events.length || !state.plan) return null;
   const minute = 60000;
+  const last = events[events.length - 1].at;
   return {
     start: Math.floor((events[0].at - minute / 2) / minute) * minute,
-    end: timeOf(source.query.endTime),
+    end: Math.ceil((last + minute / 2) / minute) * minute,
     firstChange: events[0].at,
   };
 }
-
-/* The track is the agent's session and nothing else: one dot per change, on a real time
- * axis, left edge = the instant before the agent touched anything. The playhead never
- * moves on its own - it sits at "now" until you drag it or click a dot. Anchors are read
- * off the state table by dragging to the left edge, and the revert is a list of calls in
- * the footer, because neither of those is a moment inside the session. */
 
 function selectChain(chainId, scrollTo) {
   state.selected = chainId;
@@ -413,17 +563,6 @@ function selectChain(chainId, scrollTo) {
     const card = document.querySelector('.chain[data-chain="' + chainId + '"]');
     if (card) card.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
-}
-
-/** Marker state for a chain, so every zone tells the same story about it. */
-function chainMood(chain) {
-  if (revertOutcome(chain.chainId) === "REVERTED" || revertOutcome(chain.chainId) === "SUBMITTED") {
-    return "restored";
-  }
-  if (diffVerdict(chain.chainId) === "CONFLICT") return "conflict";
-  if (chain.confidence === "UNKNOWN") return "unproven";
-  if (chain.confidence === "ASSERTED") return "asserted";
-  return "";
 }
 
 function renderTimeline() {
@@ -440,62 +579,64 @@ function renderTimeline() {
 
   const dots = $("#dots");
   dots.innerHTML = "";
-  // When a card is selected, its own dots stay lit and the rest fade back: the link
-  // between the list and the timeline has to be visible, not just implied.
   dots.classList.toggle("focused", !!state.selected);
 
-  const chains = state.plan ? state.plan.chains : [];
-
-  // One call can change the same field on several resources at the same instant -
-  // MonitorInstances takes a list - so dots that land on the same pixel are spread
-  // symmetrically around it rather than stacked on top of each other. The apparent time
-  // error is a few seconds; being unreadable is worse.
-  const places = events.map((event) => pct(event.at));
-  const crowd = new Map();
-  places.forEach((place, index) => {
-    const key = place.toFixed(1);
-    if (!crowd.has(key)) crowd.set(key, []);
-    crowd.get(key).push(index);
-  });
-  // The nudge is in pixels, not percent: a dot is 16px wide at any viewport width, so a
-  // percentage offset that clears it on a wide screen still overlaps on a narrow one.
+  // 28 changes over a quarter of an hour do not fit on a time axis without collisions -
+  // one call can even change several resources at the same instant. So positions are laid
+  // out in pixels with a minimum gap: each dot starts at its true time and is pushed right
+  // only as far as it must be to clear its neighbour, then the tail is pulled back inside
+  // the track. Order is exact and the tooltip carries the true timestamp; only the spacing
+  // of a cluster is approximate, which is the trade a readable axis is worth.
   const DOT = 16;
-  const nudge = (index) => {
-    const group = crowd.get(places[index].toFixed(1));
-    const seat = group.indexOf(index);
-    return (seat - (group.length - 1) / 2) * (DOT + 3);
-  };
+  const GAP = DOT + 3;
+  const width = $("#timeline").getBoundingClientRect().width || 1200;
+  const places = [];
+  events.forEach((event, index) => {
+    const wanted = (pct(event.at) / 100) * width;
+    places.push(index === 0 ? wanted : Math.max(wanted, places[index - 1] + GAP));
+  });
+  const rightEdge = width - DOT / 2;
+  if (places.length && places[places.length - 1] > rightEdge) {
+    for (let index = places.length - 1; index >= 0; index--) {
+      const limit = index + 1 < places.length ? places[index + 1] - GAP : rightEdge;
+      places[index] = Math.min(places[index], limit);
+    }
+  }
 
   events.forEach((event, index) => {
-    const chain = chains.find((candidate) => candidate.chainId === event.chainId);
-    const mood = chain ? chainMood(chain) : "";
-    const linked = state.selected && event.chainId === state.selected;
+    const chain = event.chain;
+    const mood = chainMood(chain);
     const dot = el(
       "div",
-      "dot" + (event.at <= at ? " past" : "") + (linked ? " linked" : "") + (mood ? " m-" + mood : "")
+      "dot" +
+        (event.at <= at ? " past" : "") +
+        (state.selected === chain.chainId ? " linked" : "") +
+        (mood ? " m-" + mood : "") +
+        (isVisible(chain) ? "" : " filtered")
     );
-    dot.style.left = places[index] + "%";
-    dot.style.marginLeft = -DOT / 2 + nudge(index) + "px";
+    dot.style.left = places[index] + "px";
+    dot.style.marginLeft = -DOT / 2 + "px";
     dot.textContent = index + 1;
-    if (event.chainId) dot.dataset.chain = event.chainId;
+    dot.dataset.chain = chain.chainId;
+
     const tip = el("div", "tip");
     tip.appendChild(el("div", "tip-head", clock(event.at) + "  " + event.eventName));
-    tip.appendChild(el("div", "tip-res", event.resourceId + " · " + event.field));
+    tip.appendChild(el("div", "tip-res", chain.resourceId + " · " + chain.field));
     const value = el("div", "tip-value");
-    // Before-values only exist once `plan` has run; scan cannot know them.
-    const before = chain ? valueAt(chain, event.at - 1) : null;
-    if (before) {
-      value.appendChild(el("span", "was", before.proven ? display(before.value) : UNPROVEN));
-      value.appendChild(el("span", "arrow", " → "));
-    }
-    value.appendChild(el("span", "now", display(event.after)));
+    value.appendChild(el("span", "was", display(event.change.before)));
+    value.appendChild(el("span", "arrow", " → "));
+    value.appendChild(el("span", "now", display(event.change.after)));
     tip.appendChild(value);
+    if (chain.confidence) {
+      tip.appendChild(
+        el("div", "tip-res", chain.confidence + " · " + chain.capability + " · " + (chain.anchor.source || "none"))
+      );
+    }
     dot.appendChild(tip);
     dot.addEventListener("click", (mouse) => {
       mouse.stopPropagation();
       state.scrubAt = event.at;
-      if (event.chainId) selectChain(event.chainId, true);
-      else render();
+      selectChain(chain.chainId, true);
     });
     dots.appendChild(dot);
   });
@@ -505,7 +646,6 @@ function renderTimeline() {
   const readout = $("#scrubtime");
   readout.textContent =
     state.scrubAt === null ? "now" : at < bounds.firstChange ? "before the session" : clock(at);
-  // The full instant stays available without spending a line of the layout on it.
   readout.title = new Date(at).toISOString();
 
   const ticks = $("#ticks");
@@ -521,24 +661,15 @@ function renderTimeline() {
 
 /** The value a field held at `at`, straight off the chain the plan handed over. */
 function valueAt(chain, at) {
-  let value = chain.anchor && chain.anchor.value !== null ? chain.anchor.value : null;
-  let proven = !(chain.anchor && chain.anchor.value === null);
+  let value = chain.anchor ? chain.anchor.value : null;
+  let proven = !!(chain.anchor && chain.anchor.value !== null);
   for (const change of chain.changes) {
     if (timeOf(change.eventTime) <= at) {
       value = change.after;
-      proven = true;
+      proven = change.after !== null;
     }
   }
   return { value, proven };
-}
-
-function stateHeader(table, label, rightLabel) {
-  const row = table.insertRow();
-  row.className = "state-head";
-  row.insertCell().outerHTML = '<td class="res">resource</td>';
-  row.insertCell().outerHTML = '<td class="fld">field</td>';
-  row.insertCell().outerHTML = '<td class="val">' + esc(label) + "</td>";
-  row.insertCell().outerHTML = '<td class="now">' + esc(rightLabel) + "</td>";
 }
 
 function renderStateTable(at) {
@@ -551,64 +682,50 @@ function renderStateTable(at) {
     : bounds && at < bounds.firstChange
     ? "before the session"
     : "at " + clock(at);
-  stateHeader(table, label, atNow ? "session left it at" : "live now");
 
-  if (!state.plan) {
-    // Scan only: CloudTrail gives the value each call set and nothing earlier.
-    const seen = new Map();
-    sessionEvents().forEach((event) => {
-      const key = event.resourceId + "." + event.field;
-      if (event.at <= at) seen.set(key, event);
-      else if (!seen.has(key)) seen.set(key, null);
-    });
-    [...seen.entries()].forEach(([key, event]) => {
-      const [resource, field] = key.split(/\.(?=[^.]+$)/);
-      const row = table.insertRow();
-      row.insertCell().outerHTML = '<td class="res">' + esc(shortResource(resource)) + "</td>";
-      row.insertCell().outerHTML = '<td class="fld">' + esc(field) + "</td>";
-      row.insertCell().outerHTML =
-        '<td class="val' + (event ? "" : " q") + '">' + esc(event ? display(event.after) : UNPROVEN) + "</td>";
-      row.insertCell().outerHTML =
-        '<td class="now">' + (event ? "set by " + esc(event.eventName) : "not set yet in this window") + "</td>";
-    });
-    return;
-  }
+  const head = table.insertRow();
+  head.className = "state-head";
+  head.insertCell().outerHTML = '<td class="res">resource</td>';
+  head.insertCell().outerHTML = '<td class="fld">field</td>';
+  head.insertCell().outerHTML = '<td class="val">' + esc(label) + "</td>";
+  head.insertCell().outerHTML =
+    '<td class="now">' + (atNow ? "session left it at" : "live now") + "</td>";
 
-  state.plan.chains.forEach((chain) => {
-    const live = liveValue(chain.chainId);
-    const nowValue = live !== null ? live : display(chain.netAfter);
-    // Scrubbed back: the value the chain says the field held then. Parked at "now": the
-    // live value, which is the only thing that stays true after a revert has run.
-    const { value, proven } = atNow ? { value: nowValue, proven: true } : valueAt(chain, at);
+  // Only fields that carry a value at all. The rest are changes CloudTrail recorded with
+  // no value in them, which belong in the card list, not in a table of values.
+  const valued = (state.plan ? state.plan.chains : []).filter(
+    (chain) => chain.netBefore !== null || chain.netAfter !== null
+  );
+  valued.forEach((chain) => {
+    const entry = diffEntry(chain.chainId);
+    const result = revertResult(chain.chainId);
+    const latest = latestRead(chain.chainId);
+    const reads = Object.keys(latest).map((key) =>
+      key === "result" ? (latest.result || {}).observedAfter : (latest.entry || {}).liveValue
+    );
+    const live = reads.find((value) => value !== null && value !== undefined) ?? chain.netAfter;
+    const { value, proven } = atNow ? { value: live, proven: live !== null } : valueAt(chain, at);
     const shown = proven ? display(value) : UNPROVEN;
+    const status = chainStatus(chain);
+    const restored = ["REVERTED", "SUBMITTED", "ALREADY_REVERTED"].includes(status);
+    const failed = status === "FAILED";
+
     const row = table.insertRow();
     row.insertCell().outerHTML = '<td class="res">' + esc(shortResource(chain.resourceId)) + "</td>";
     row.insertCell().outerHTML = '<td class="fld">' + esc(chain.field) + "</td>";
-    const restored = revertOutcome(chain.chainId) === "REVERTED";
-    let valueClass = proven ? "" : " q";
-    if (atNow && restored) valueClass = " ok";
-    else if (!atNow && proven && shown !== nowValue) valueClass = " changed";
-    row.insertCell().outerHTML = '<td class="val' + valueClass + '">' + esc(shown) + "</td>";
+    let cls = proven ? "" : " q";
+    if (atNow && restored) cls = " ok";
+    else if (atNow && failed) cls = " bad";
+    else if (!atNow && proven && shown !== display(live)) cls = " changed";
+    row.insertCell().outerHTML = '<td class="val' + cls + '">' + esc(shown) + "</td>";
+    const note = atNow
+      ? display(chain.netAfter) + (restored ? " · ✓ restored" : failed ? " · ✗ failed" : "")
+      : display(live);
     row.insertCell().outerHTML =
-      '<td class="now' + (atNow && restored ? " restored" : "") + '">' +
-      esc(atNow ? display(chain.netAfter) : nowValue) +
-      (atNow && restored ? " · ✓ restored" : "") +
+      '<td class="now' + (atNow && restored ? " restored" : atNow && failed ? " bad" : "") + '">' +
+      esc(note) +
       "</td>";
   });
-}
-
-function liveValue(chainId) {
-  if (state.revert) {
-    const result = (state.revert.results || []).find((r) => r.chainId === chainId);
-    if (result && result.observedAfter !== null && result.observedAfter !== undefined) {
-      return result.observedAfter;
-    }
-  }
-  if (state.diff) {
-    const entry = (state.diff.entries || []).find((e) => e.chainId === chainId);
-    if (entry) return display(entry.liveValue);
-  }
-  return null;
 }
 
 function attachScrubbing() {
@@ -630,7 +747,7 @@ function attachScrubbing() {
   window.addEventListener("mouseup", () => (dragging = false));
 }
 
-/* -- chain cards ----------------------------------------------------------- */
+// -- the list ----------------------------------------------------------------
 
 function renderChains() {
   const host = $("#chainlist");
@@ -639,67 +756,83 @@ function renderChains() {
   host.innerHTML = "";
 
   if (state.plan) {
-    head.textContent = "Changes · " + state.plan.stats.chains + " field(s)";
+    const chains = state.plan.chains;
+    head.textContent = "Changes · " + chains.length + " field(s)";
     note.innerHTML =
-      "One card per field. <b>Left of the arrow is the value to restore</b>, right is where the " +
-      "field sits now. Click a card: its events light up on the timeline and the evidence " +
-      "appears on the right.";
-    state.plan.chains.forEach((chain) => host.appendChild(chainCard(chain)));
+      "One card per field. <b>Left of the arrow is the value to restore</b>, right is what " +
+      "the session set. Click a card for its evidence; its events light up on the timeline.";
+    // Only what can be acted on is open. The rest are grouped by the reason they cannot be,
+    // collapsed but counted - never dropped, because "reported and not hidden" is the point.
+    chainGroups().forEach((group) => {
+      const open = state.open[group.key] ?? group.open;
+      const section = el("section", "group" + (open ? " open" : ""));
+      const header = el("button", "group-head");
+      header.appendChild(el("span", "caret", open ? "▾" : "▸"));
+      header.appendChild(el("span", "group-title", group.title));
+      header.appendChild(el("span", "group-count", String(group.chains.length)));
+      if (group.note) header.appendChild(el("span", "group-note", group.note));
+      header.addEventListener("click", () => {
+        state.open[group.key] = !open;
+        render();
+      });
+      section.appendChild(header);
+      if (open) {
+        const body = el("div", "group-body");
+        group.chains.forEach((chain) => body.appendChild(chainCard(chain)));
+        section.appendChild(body);
+      }
+      host.appendChild(section);
+    });
     return;
   }
+
   if (state.scan) {
-    head.textContent = "Events · " + state.scan.changes.length + " field change(s)";
+    head.textContent = "Identities · " + state.scan.identities.length;
     note.innerHTML =
-      "Straight out of CloudTrail: the value each call <i>set</i>. Every before-value is " +
-      "<b>?</b> because the record does not contain it — that is what the next step resolves.";
-    state.scan.changes.forEach((change, index) => host.appendChild(scanCard(change, index)));
+      "Straight out of CloudTrail, one row per identity. <b>PLUGIN-BACKED</b> counts the " +
+      "changes <code>rewind revert</code> could execute. No before-value exists yet — " +
+      "CloudTrail does not record them.";
+    state.scan.identities.forEach((row, index) => host.appendChild(identityCard(row, index)));
     return;
   }
+
   head.textContent = "Changes";
-  note.textContent = "One row per field the identity touched. Click a row to see its evidence.";
-  host.appendChild(
-    (() => {
-      const p = el("p", "empty");
-      p.innerHTML = "Run <b>Scan</b> to read CloudTrail for this identity and window.";
-      return p;
-    })()
-  );
+  note.textContent = "Press the button above to read CloudTrail.";
+  const empty = el("p", "empty");
+  empty.innerHTML = "Press <b>Scan CloudTrail</b> to start.";
+  host.appendChild(empty);
 }
 
-function scanCard(change, index) {
-  const card = el("div", "chain");
+function identityCard(row, index) {
+  const card = el("div", "chain identity" + (index === 0 ? " primary" : ""));
   const left = el("div");
-  left.appendChild(
-    (() => {
-      const who = el("div", "who");
-      who.innerHTML = "<b>" + esc(change.resourceId) + "</b> · " + esc(change.field);
-      return who;
-    })()
-  );
-  const transition = el("div", "transition");
-  transition.appendChild(el("span", "before q", UNPROVEN));
-  transition.appendChild(el("span", "arrow", "→"));
-  transition.appendChild(el("span", "after", display(change.setTo)));
-  left.appendChild(transition);
+  const who = el("div", "who");
+  who.innerHTML = "<b>" + esc(row.identity) + "</b>";
+  left.appendChild(who);
+  left.appendChild(el("div", "events", row.events));
   card.appendChild(left);
 
   const right = el("div", "right");
-  right.appendChild(el("span", "chip steps", clock(timeOf(change.eventTime))));
-  right.appendChild(el("span", "chip src", change.eventName));
+  right.appendChild(el("span", "chip steps", row.changes + " changes"));
+  right.appendChild(el("span", "chip src", row.resources + " resources"));
+  if (row.pluginBacked !== "-") {
+    right.appendChild(el("span", "chip AUTO", row.pluginBacked + " revertible"));
+  }
   card.appendChild(right);
-
-  card.addEventListener("click", () => {
-    state.scrubAt = timeOf(change.eventTime);
-    render();
-  });
   return card;
 }
 
 function chainCard(chain) {
+  const mood = chainMood(chain);
   const unknown = chain.confidence === "UNKNOWN";
-  const card = el("div", "chain" + (unknown ? " unknown" : "") + (state.selected === chain.chainId ? " selected" : ""));
+  const card = el(
+    "div",
+    "chain" +
+      (unknown ? " unknown" : "") +
+      (state.selected === chain.chainId ? " selected" : "") +
+      (mood ? " m-" + mood : "")
+  );
   card.dataset.chain = chain.chainId;
-  // Hovering a card previews the link to the timeline before you commit a click.
   card.addEventListener("mouseenter", () => highlightDots(chain.chainId, true));
   card.addEventListener("mouseleave", () => highlightDots(chain.chainId, false));
 
@@ -709,9 +842,9 @@ function chainCard(chain) {
   left.appendChild(who);
 
   const transition = el("div", "transition");
-  const beforeClass =
-    "before" + (unknown ? " q" : "") + (chain.confidence === "ASSERTED" ? " asserted" : "");
-  transition.appendChild(el("span", beforeClass, display(chain.netBefore)));
+  transition.appendChild(
+    el("span", "before" + (chain.netBefore === null ? " q" : ""), display(chain.netBefore))
+  );
   transition.appendChild(el("span", "arrow", "→"));
   transition.appendChild(el("span", "after", display(chain.netAfter)));
   left.appendChild(transition);
@@ -719,57 +852,31 @@ function chainCard(chain) {
 
   const right = el("div", "right");
   right.appendChild(el("span", "chip " + chain.confidence, chain.confidence));
-  if (chain.anchor && chain.anchor.source && chain.anchor.source !== "none") {
-    right.appendChild(el("span", "chip src", chain.anchor.source));
-  }
+  right.appendChild(el("span", "chip " + chain.capability, chain.capability));
   card.appendChild(right);
 
   const meta = el("div", "meta");
-  meta.appendChild(
-    el("span", "chip steps", chain.changeCount + (chain.changeCount === 1 ? " step" : " steps"))
-  );
-  // A revert outcome supersedes the diff verdict it was based on; showing both just
-  // says the same thing twice.
-  const outcome = revertOutcome(chain.chainId);
-  const verdict = outcome ? null : diffVerdict(chain.chainId);
-  if (verdict) meta.appendChild(el("span", "chip v-" + verdict, verdict.replace(/_/g, " ")));
-  if (outcome) meta.appendChild(el("span", "chip v-" + outcome, outcome.replace(/_/g, " ")));
-  if (chain.changeCount > 1) {
-    // Only the intermediate values: the last one is where the field sits now, and the
-    // first is the target, so neither belongs in "passed through on the way".
-    const path = chain.changes.slice(0, -1).map((change) => display(change.after));
-    meta.appendChild(el("span", "hint", "via " + path.join(" → ") + " — not the revert target"));
+  if (chain.anchor.source && chain.anchor.source !== "none") {
+    meta.appendChild(el("span", "chip src", chain.anchor.source));
+  }
+  const status = chainStatus(chain);
+  const result = revertResult(chain.chainId);
+  if (status !== chain.capability) {
+    meta.appendChild(el("span", "chip v-" + status, status.replace(/_/g, " ")));
+  }
+  if (chain.revert.executable) {
+    meta.appendChild(
+      el("span", "hint", "revert → " + display(chain.revert.targetValue) + " via " +
+        chain.revert.steps.map((step) => step.api).join(", "))
+    );
+  }
+  if (result && result.outcome === "FAILED") {
+    meta.appendChild(el("span", "hint bad", result.reason || ""));
   }
   card.appendChild(meta);
 
-  if (unknown) card.appendChild(supplyRow(chain));
-
-  card.addEventListener("click", (mouse) => {
-    if (mouse.target.closest(".supply")) return;
-    state.selected = chain.chainId;
-    render();
-  });
+  card.addEventListener("click", () => selectChain(chain.chainId, false));
   return card;
-}
-
-function supplyRow(chain) {
-  const row = el("div", "supply");
-  const input = el("input");
-  input.placeholder = "the real previous value";
-  input.value = state.asserted[chain.chainId] || "";
-  const apply = el("button", "btn btn-primary", "Use this value");
-  apply.addEventListener("click", async () => {
-    const value = input.value.trim();
-    if (!value) return;
-    state.asserted[chain.chainId] = value;
-    state.selected = chain.chainId;
-    await doPlan();
-  });
-  const hint = el("span", "hint");
-  hint.innerHTML =
-    "no resolver could prove this &mdash; supplying it records <b>ASSERTED</b>, never proof";
-  row.append(input, apply, hint);
-  return row;
 }
 
 function highlightDots(chainId, on) {
@@ -778,32 +885,18 @@ function highlightDots(chainId, on) {
     .forEach((dot) => dot.classList.toggle("hover", on));
 }
 
-function diffVerdict(chainId) {
-  if (!state.diff) return null;
-  const entry = (state.diff.entries || []).find((e) => e.chainId === chainId);
-  return entry ? entry.verdict : null;
-}
+// -- evidence ----------------------------------------------------------------
 
-function revertOutcome(chainId) {
-  if (!state.revert) return null;
-  const result = (state.revert.results || []).find((r) => r.chainId === chainId);
-  return result ? result.outcome : null;
-}
-
-/* -- evidence -------------------------------------------------------------- */
-
-/** The anchor note carries every resolver that was tried and why it missed. */
+/** The anchor reason carries every resolver that was tried and why it missed. */
 function parseResolverNote(note) {
   const match = /\(([^()]*(?:\([^()]*\)[^()]*)*)\)\s*$/.exec(note || "");
   if (!match) return null;
-  return match[1]
-    .split("; ")
-    .map((part) => {
-      const split = part.indexOf(": ");
-      if (split < 0) return null;
-      return { name: part.slice(0, split), reason: part.slice(split + 2) };
-    })
-    .filter(Boolean);
+  const parts = match[1].split("; ").map((part) => {
+    const split = part.indexOf(": ");
+    return split < 0 ? null : { name: part.slice(0, split), reason: part.slice(split + 2) };
+  });
+  const resolvers = parts.filter(Boolean);
+  return resolvers.length > 1 ? resolvers : null;
 }
 
 function block(title) {
@@ -834,11 +927,9 @@ function renderEvidence() {
     return;
   }
 
-  const head = el("div", "ev-head", chain.resourceId + "." + chain.field);
-  const sub = el("div", "ev-sub", chain.chainId + " · " + chain.operation);
-  host.append(head, sub);
+  host.appendChild(el("div", "ev-head", chain.resourceId + "." + chain.field));
+  host.appendChild(el("div", "ev-sub", chain.chainId + " · handled by " + (chain.handledBy || "—")));
 
-  // anchor
   const anchor = chain.anchor || {};
   const anchorBlock = block("Previous value");
   anchorBlock.appendChild(row("value", display(anchor.value)));
@@ -847,10 +938,8 @@ function renderEvidence() {
   (anchor.evidenceEventIds || []).forEach((id, index) =>
     anchorBlock.appendChild(row(index === 0 ? "event" : "", id))
   );
-  const resolvers = parseResolverNote(anchor.note);
-  if (anchor.note && !resolvers) {
-    anchorBlock.appendChild(el("div", "ev-note", anchor.note));
-  }
+  const resolvers = parseResolverNote(anchor.reason);
+  if (anchor.reason && !resolvers) anchorBlock.appendChild(el("div", "ev-note", anchor.reason));
   host.appendChild(anchorBlock);
 
   if (resolvers) {
@@ -867,32 +956,13 @@ function renderEvidence() {
     });
     list.appendChild(items);
     const hint = el("div", "ev-note");
-    hint.innerHTML =
-      "No source could prove it, so the tool reports <b>?</b> rather than a plausible guess.";
+    hint.innerHTML = "No source could prove it, so the tool reports <b>?</b> rather than a guess.";
     list.appendChild(hint);
-    host.appendChild(list);
-  } else if (anchor.source && anchor.source !== "none") {
-    const list = block("Resolver chain");
-    const items = el("ul", "resolvers");
-    ["response-elements", "config-history", "local-snapshot", "cloudtrail-window", "creation-event", "operator-supplied"].forEach(
-      (name) => {
-        const hit = name === anchor.source;
-        const item = el("li", hit ? "hit" : "");
-        item.appendChild(el("span", "mark", hit ? "✓" : "·"));
-        const body = el("span");
-        body.appendChild(el("span", "rname", name));
-        if (hit) body.appendChild(document.createTextNode(" — " + (anchor.note || "proved the value")));
-        item.appendChild(body);
-        items.appendChild(item);
-      }
-    );
-    list.appendChild(items);
     host.appendChild(list);
   }
 
-  // the chain itself
   const chainBlock = block("Change chain");
-  const chainList = el("ul", "steps");
+  const steps = el("ul", "steps");
   chain.changes.forEach((change) => {
     const item = el("li");
     item.innerHTML =
@@ -907,76 +977,73 @@ function renderEvidence() {
       '<br><code>' +
       esc(change.eventId) +
       "</code>";
-    chainList.appendChild(item);
+    steps.appendChild(item);
   });
-  chainBlock.appendChild(chainList);
+  chainBlock.appendChild(steps);
   (chain.notes || []).forEach((note) => chainBlock.appendChild(el("div", "ev-note", note)));
   host.appendChild(chainBlock);
 
-  // revert
   const revert = chain.revert || {};
-  const revertBlock = block(revert.executable ? "Revert · planned calls" : "Revert · not possible");
+  const revertBlock = block(revert.executable ? "Revert · planned calls" : "Revert · not automatic");
   if (revert.executable) {
     revertBlock.appendChild(row("target", display(revert.targetValue)));
-    const steps = el("ul", "steps");
-    (revert.steps || []).forEach((step) => {
-      const item = el("li");
-      item.innerHTML =
-        '<span class="api">' +
-        esc(step.api) +
-        "</span><br><code>" +
-        esc(JSON.stringify(step.params)) +
-        "</code>" +
-        (step.condition ? '<br><span class="cond">' + esc(step.condition) + "</span>" : "") +
-        (step.waitFor ? '<br><span class="cond">wait for ' + esc(step.waitFor) + "</span>" : "");
-      steps.appendChild(item);
-    });
-    revertBlock.appendChild(steps);
-    if (revert.verify) {
-      revertBlock.appendChild(
-        row("verify", revert.verify.api + " expect " + display(revert.verify.expect))
-      );
-    }
-    if (revert.warning) revertBlock.appendChild(el("div", "ev-warn", revert.warning));
+    const calls = el("ul", "steps");
+    revert.steps.forEach((step) => calls.appendChild(el("li", "api", step.api)));
+    revertBlock.appendChild(calls);
   } else {
     revertBlock.appendChild(el("div", "ev-note", revert.reason || "not executable"));
   }
+  if (revert.warning) revertBlock.appendChild(el("div", "ev-warn", revert.warning));
   host.appendChild(revertBlock);
 
-  const result = state.revert && (state.revert.results || []).find((r) => r.chainId === chain.chainId);
-  if (result) {
-    const outcomeBlock = block("Last run");
-    outcomeBlock.appendChild(row("outcome", result.outcome));
-    outcomeBlock.appendChild(row("reason", result.reason || ""));
-    if (result.observedBefore !== null && result.observedBefore !== undefined) {
-      outcomeBlock.appendChild(row("observed", display(result.observedBefore) + " → " + display(result.observedAfter)));
-    }
-    (result.calls || result.plannedCalls || []).forEach((planned) =>
-      outcomeBlock.appendChild(row("call", planned.api))
+  const entry = diffEntry(chain.chainId);
+  if (entry) {
+    const driftBlock = block("Drift check");
+    driftBlock.appendChild(row("verdict", entry.verdict));
+    driftBlock.appendChild(
+      row("live now", display(entry.liveValue) + "  (session set " + display(entry.planAfter) + ")")
     );
-    host.appendChild(outcomeBlock);
+    if (entry.reason) driftBlock.appendChild(el("div", "ev-note", entry.reason));
+    host.appendChild(driftBlock);
+  }
+
+  const result = revertResult(chain.chainId);
+  if (result) {
+    const runBlock = block("Revert run");
+    runBlock.appendChild(row("outcome", result.outcome));
+    if (result.reason) runBlock.appendChild(el("div", "ev-note", result.reason));
+    result.calls.forEach((planned) =>
+      runBlock.appendChild(row("called", planned.api + (planned.note ? "  # " + planned.note : "")))
+    );
+    if (result.warning) runBlock.appendChild(el("div", "ev-warn", result.warning));
+    host.appendChild(runBlock);
+  }
+
+  // The CLI's own words for this chain, so the panel can be checked against the terminal.
+  if (chain.evidenceLines && chain.evidenceLines.length) {
+    const verbatim = block("As rewind printed it");
+    verbatim.appendChild(el("pre", "ev-verbatim", chain.evidenceLines.join("\n")));
+    host.appendChild(verbatim);
   }
 }
 
-/* -- footer ---------------------------------------------------------------- */
+// -- footer ------------------------------------------------------------------
 
 function renderActions() {
   const host = $("#actions");
   host.hidden = !state.plan;
   if (!state.plan) return;
   const stats = state.plan.stats;
-  const parts = [
-    "<b>" + stats.revertible + "</b> of <b>" + stats.chains + "</b> field(s) revertible",
-  ];
-  if (stats.unprovable) parts.push('<span class="warn">' + stats.unprovable + " unprovable</span>");
-  if (state.diff && !state.diff.driftFree) {
-    parts.push('<span class="warn">' + (state.diff.summary.CONFLICT || 0) + " conflict(s)</span>");
-  }
+  const parts = ["<b>" + stats.revertible + "</b> of <b>" + stats.chains + "</b> field(s) revertible"];
+  const unprovable = stats.byConfidence.UNKNOWN;
+  if (unprovable) parts.push('<span class="warn">' + unprovable + " unprovable</span>");
   if (state.revert) {
+    const failed = state.revert.summary.FAILED || 0;
     parts.push(state.revert.dryRun ? "dry run complete" : "applied");
+    if (failed) parts.push('<span class="bad">' + failed + " failed</span>");
   }
   $("#revertsummary").innerHTML = parts.join(" · ");
-  $("#confirm").disabled = stats.revertible === 0;
+  $("#confirm").disabled = !stats.revertible;
   renderRevertCalls();
 }
 
@@ -996,16 +1063,21 @@ function renderRevertCalls() {
   );
   acting.forEach((result, index) => {
     const applied = result.outcome === "REVERTED" || result.outcome === "SUBMITTED";
+    const failed = result.outcome === "FAILED";
     const chip = el(
       "button",
-      "call-chip" + (applied ? " applied" : "") + (state.selected === result.chainId ? " linked" : "")
+      "call-chip" +
+        (applied ? " applied" : "") +
+        (failed ? " failed" : "") +
+        (state.selected === result.chainId ? " linked" : "")
     );
     chip.appendChild(el("b", null, String(index + 1)));
     chip.appendChild(
-      document.createTextNode(shortResource(result.resourceId) + "." + result.field + " → " + display(result.targetValue))
+      document.createTextNode(
+        shortResource(result.resourceId) + "." + result.field + " → " + display(result.targetValue)
+      )
     );
-    chip.title =
-      result.outcome.replace(/_/g, " ").toLowerCase() + " — " + (result.reason || "");
+    chip.title = result.outcome.replace(/_/g, " ") + " — " + (result.reason || "");
     chip.addEventListener("click", () => selectChain(result.chainId, true));
     host.appendChild(chip);
   });
@@ -1016,19 +1088,36 @@ function renderRevertCalls() {
 async function boot() {
   const session = await (await fetch("/api/session")).json();
   state.mode = session.mode;
-  state.account = session.account;
-  $("#mode").textContent = session.mode === "demo" ? "demo · fixture" : "live · aws";
-  $("#mode").dataset.mode = session.mode;
+  state.recorded = session.recorded;
+  if (session.mode === "demo") {
+    // A refresh is how a presenter starts over, so the replay must be at step 0 here no
+    // matter what the previous visitor left behind on the server.
+    await fetch("/api/reset", { method: "POST", body: "{}" }).catch(() => {});
+  }
   $("#identity").value = session.identity || "";
   $("#region").value = session.region || "";
-  $("#since").value = session.since || "90m";
-  $("#reset").hidden = session.mode !== "demo";
-  if (session.mode === "demo") {
+
+  const badge = $("#mode");
+  badge.dataset.mode = session.mode;
+  if (session.mode === "demo" && session.recorded) {
+    badge.textContent = "replay · " + (session.recorded.recordedAt || "").slice(0, 10);
+    badge.title = "replaying " + session.recorded.source;
+    $("#sourceline").textContent =
+      "replaying a recorded real run · account " +
+      session.recorded.account +
+      " · " +
+      session.recorded.commands.length +
+      " commands · nothing runs now";
     banner(
-      "Demo mode: a sanitized CloudTrail fixture and an in-memory account. No AWS " +
-        "credentials are used and no call leaves this machine. Press the amber button " +
-        "(or <kbd>space</kbd>) five times to walk the whole story."
+      "This is a <b>recorded real session</b> against AWS account " +
+        esc(session.recorded.account) +
+        ", replayed step by step: every table, value and event id below is that run's own " +
+        "output, and the terminal pane keeps it verbatim. Press the amber button (or " +
+        "<kbd>space</kbd>) six times."
     );
+  } else {
+    badge.textContent = "live · aws";
+    $("#sourceline").textContent = "live mode · commands run against the ambient AWS configuration";
   }
 
   $("#next").addEventListener("click", () => advance());
@@ -1039,8 +1128,6 @@ async function boot() {
     })
   );
 
-  // Space advances the demo, so a presenter never has to find the cursor. Typing in a
-  // field must still type, and the buttons keep their own Enter/Space behaviour.
   window.addEventListener("keydown", (key) => {
     const target = key.target;
     if (target && (target.tagName === "INPUT" || target.tagName === "BUTTON")) return;
@@ -1049,6 +1136,8 @@ async function boot() {
       advance();
     } else if (key.key === "?") {
       $("#helpsheet").hidden = !$("#helpsheet").hidden;
+    } else if (key.key === "t") {
+      toggleTerminal();
     } else if (key.key === "Escape") {
       $("#helpsheet").hidden = true;
     }
@@ -1061,42 +1150,25 @@ async function boot() {
 
   $("#dryrun").addEventListener("click", () => doRevert(false).catch(() => {}));
   $("#confirm").addEventListener("click", () => confirmRevert().catch(() => {}));
-  $("#rawtoggle").addEventListener("click", () => ($("#raw").hidden = !$("#raw").hidden));
+  $("#termtoggle").addEventListener("click", toggleTerminal);
   $("#scrubreset").addEventListener("click", () => {
     state.scrubAt = null;
     renderTimeline();
   });
-  $("#tamper").hidden = session.mode !== "demo";
-  $("#tamper").addEventListener("click", async () => {
-    const result = await call("/api/tamper", {});
-    const what = result.payload;
-    banner(
-      "A third party just set <b>" +
-        esc(what.resource) +
-        "." +
-        esc(what.field) +
-        "</b> to <b>" +
-        esc(what.value) +
-        "</b>, after the plan was made. Press <b>Check drift</b>: the plan is now stale for " +
-        "that field and reverting it would overwrite work that is not the agent's."
-    );
-    state.diff = null;
-    state.revert = null;
-    // Rewind the driver so the next press is the drift check, which is the point.
-    markStage("plan");
-    render();
-  });
-
   $("#reset").addEventListener("click", () => resetDemo().catch(() => {}));
-  document.querySelectorAll(".query input").forEach((input) =>
-    input.addEventListener("keydown", (key) => {
-      if (key.key === "Enter") doScan().catch(() => {});
-    })
-  );
 
   attachScrubbing();
+  window.addEventListener("resize", () => renderTimeline());
   markStage(null);
+  renderTerminal();
   render();
+}
+
+function toggleTerminal() {
+  const pane = $("#terminal");
+  pane.hidden = !pane.hidden;
+  $("#termtoggle").classList.toggle("on", !pane.hidden);
+  if (!pane.hidden) renderTerminal();
 }
 
 boot();

@@ -16,14 +16,14 @@
   </div>
   <div class="bar-right">
     <span id="mode" class="badge badge-mode">&mdash;</span>
+    <button id="termtoggle" class="btn btn-ghost" title="Show the verbatim output of every command (t)">terminal</button>
     <button id="help" class="btn btn-ghost" title="What am I looking at? (?)">?</button>
-    <button id="tamper" class="btn btn-ghost" title="Have a third party change a field the agent also touched">Simulate someone else's change</button>
-    <button id="reset" class="btn btn-ghost" title="Reset the demo account and start over">Reset</button>
+    <button id="reset" class="btn btn-ghost" title="Rewind the replay to the start">Start over</button>
   </div>
 </header>
 
-<!-- The demo is this one button, pressed five times. The numbered buttons below it are
-     the same steps out of order, for when a question sends you back a step. -->
+<!-- The demo is this one button, pressed six times: the six commands the recorded session
+     actually ran. The numbered buttons are the same steps, for jumping back. -->
 <section class="drive">
   <button id="next" class="btn btn-next">Scan CloudTrail</button>
   <div class="drive-text">
@@ -36,24 +36,32 @@
     <button class="btn act" data-act="diff"><b>3</b> Drift</button>
     <button class="btn act" data-act="dryrun"><b>4</b> Dry run</button>
     <button class="btn act" data-act="confirm"><b>5</b> Confirm</button>
+    <button class="btn act" data-act="verify"><b>6</b> Verify</button>
   </div>
 </section>
 
 <section class="query">
-  <label>identity <input id="identity" spellcheck="false" placeholder="perf-agent"></label>
-  <label>window <input id="since" spellcheck="false" placeholder="90m" size="6"></label>
-  <label>region <input id="region" spellcheck="false" placeholder="us-west-1" size="12"></label>
-  <span class="query-note">press <kbd>space</kbd> to advance the demo &middot; <kbd>?</kbd> for help</span>
+  <label>identity <input id="identity" spellcheck="false" readonly></label>
+  <label>region <input id="region" spellcheck="false" size="12" readonly></label>
+  <span id="sourceline" class="query-note">&mdash;</span>
 </section>
 
 <section class="cmd">
   <code id="cmdline">$ rewind --help</code>
   <div class="cmd-right">
     <span id="cmdstatus" class="muted"></span>
-    <button id="rawtoggle" class="btn btn-ghost">raw JSON</button>
+    <span class="muted" id="termcount"></span>
   </div>
 </section>
-<pre id="raw" class="raw" hidden></pre>
+
+<!-- The receipt: every command's own output, unedited, in the order they ran. -->
+<section id="terminal" class="terminal" hidden>
+  <div class="term-head">
+    <span>rewind output, verbatim</span>
+    <span class="muted">press <kbd>t</kbd> to hide</span>
+  </div>
+  <div id="termbody" class="term-body"></div>
+</section>
 
 <section id="banner" class="banner" hidden></section>
 
@@ -84,9 +92,9 @@
 <main class="split">
   <section class="chains">
     <h2 id="chainshead">Changes</h2>
-    <p class="section-note" id="chainsnote">One row per field the identity touched. Click a row to see its evidence.</p>
+    <p class="section-note" id="chainsnote">Press the button above to read CloudTrail.</p>
     <div id="chainlist" class="chainlist">
-      <p class="empty">Press <b>Scan CloudTrail</b> above to read CloudTrail for this identity and window.</p>
+      <p class="empty">Press <b>Scan CloudTrail</b> to start.</p>
     </div>
   </section>
   <aside class="evidence" id="evidence">
@@ -99,24 +107,33 @@
   <div class="helpcard">
     <h2>How to drive this</h2>
     <ol>
-      <li><b>Press the big button five times.</b> It runs, in order: <code>scan</code>,
-        <code>plan</code>, <code>diff</code>, <code>revert</code> (dry run),
-        <code>revert --confirm</code>. <kbd>space</kbd> does the same thing.</li>
-      <li><b>The strip under it</b> is the real command being run. Open <i>raw JSON</i> to
-        show the document every panel is drawn from.</li>
-      <li><b>The timeline is the agent's session</b>, one dot per change. Drag it and the
-        table below shows what each field held at that moment; drag it to the far left for
-        the before-values. It never moves on its own. From step 3 the dots take on each
-        field's state: red conflict, green restored, dashed grey unproven.</li>
-      <li><b>The cards</b> are one per field. Click one: the panel on the right shows the
-        event id that proves its before-value, the change chain, and the API calls a
-        revert would make. Its dots light up on the timeline.</li>
-      <li><b>A dashed grey card</b> means no resolver could prove the old value. Type one
-        into it and the plan re-runs with <code>--set</code>; it comes back blue
-        (<b>ASSERTED</b>), never green.</li>
-      <li><b>Simulate someone else's change</b> (top right) makes a third party edit a
-        field behind the plan's back, so step 3 finds a <b>CONFLICT</b> and step 4 refuses
-        to overwrite it.</li>
+      <li><b>Press the big button six times.</b> It replays, in order: <code>scan</code>,
+        <code>plan --explain</code>, <code>diff</code>, <code>revert</code> (dry run),
+        <code>revert --confirm</code>, <code>diff</code> again to verify.
+        <kbd>space</kbd> does the same thing.</li>
+      <li><b>This is the output of a real run</b> against a real AWS account, not a mock.
+        Press <kbd>t</kbd> for the terminal pane: every command's own output, verbatim. If a
+        number on screen is not in there, it did not come from rewind. (The transcript is
+        <code>demodata/session.txt</code>, derived from the CLI's live-validation capture —
+        <code>demodata/derive.py</code> states exactly what differs.)</li>
+      <li><b>Step 1 names identities, not values.</b> CloudTrail records what a call
+        <i>set</i>; nothing in it says what the value <i>was</i>. That is step 2's job.</li>
+      <li><b>The timeline is the session</b>, one dot per change. Drag it and the table
+        below shows what each field held at that moment; drag it to the far left for the
+        before-values. It never moves on its own.</li>
+      <li><b>The cards</b> are grouped by what can be done about them. The top group —
+        revertible, reverted, failed — is open; the rest are collapsed with a count and the
+        reason: <code>SKIPPED</code> / <code>DISCOVERED</code> (CloudTrail recorded the
+        change but not the value), <code>UNCHECKABLE</code> (no Describe plugin),
+        <code>UNREADABLE</code> (the resource is gone). Click a header to expand one.</li>
+      <li><b>Click a card</b> for the evidence: the event id that proves the before-value,
+        the change chain, the calls a revert would make, and at the bottom the CLI's own
+        words for that field.</li>
+      <li><b>Step 5 does not claim more than it knows.</b> Four fields are
+        <code>REVERTED</code> — written and confirmed by a read-back. Two are
+        <code>SUBMITTED</code>: RDS applies Multi-AZ asynchronously and EC2's monitoring flag
+        had not converged yet, so the tool reports accepted-not-settled. Step 6 shows both
+        closed, which is how an asynchronous field is meant to be polled.</li>
     </ol>
     <button id="helpclose" class="btn">Got it</button>
   </div>

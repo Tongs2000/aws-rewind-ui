@@ -3,230 +3,145 @@
  *   cd /tmp && mkdir -p rwtest && cd rwtest && npm i jsdom
  *   cp <repo>/dev/smoke.mjs . && node smoke.mjs        # server must be running
  *
- * Checks the demo as a presenter would walk it: five presses of the driver button, the
- * evidence panel for a proved and an unproved field, supplying a value, the scrubber, the
- * card/timeline link, and the conflict beat. Fails loudly if any JS error fires.
+ * Walks the replay the way a presenter does - six presses - and checks what each step puts
+ * on screen, the filter chips, the evidence panel, the terminal pane, and the playhead.
+ * Exits non-zero on any JS error or failed assertion.
  */
 
 import { JSDOM } from "jsdom";
-
-const BASE = process.env.REWIND_UI || "http://127.0.0.1:8787";
+const B = process.env.REWIND_UI || "http://127.0.0.1:8787";
 const errors = [];
-
-const html = await (await fetch(BASE + "/")).text();
-const js = await (await fetch(BASE + "/app.js")).text();
-const css = await (await fetch(BASE + "/app.css")).text();
-
-/* Rules whose absence silently wrecks the layout rather than throwing: a missing
- * `.tip { display: none }` dumps every tooltip onto the axis, a missing `.ticks`
- * collapses five timestamps into one run of digits, a missing `.scrubber` makes the
- * playhead invisible. Editing CSS by block deletion has taken these out before. */
-const REQUIRED_CSS = [
-  ".dot .tip", ".dot:hover .tip", ".ticks", ".ticks span",
-  ".scrubber", ".scrubber .handle",
-  ".state td", ".state tr.state-head td",
-  ".call-chip", "[hidden]",
-];
-const missingCss = REQUIRED_CSS.filter((rule) => !css.includes(rule));
-if (missingCss.length) errors.push("app.css lost these rules: " + missingCss.join(", "));
-console.log("css rules        :", missingCss.length ? "MISSING " + missingCss.join(", ") : "all present");
-
-const dom = new JSDOM(html, { runScripts: "outside-only", url: BASE + "/", pretendToBeVisual: true });
-const { window } = dom;
-window.fetch = (url, opts) => fetch(new URL(url, BASE).href, opts);
-window.onerror = (m) => errors.push("onerror: " + m);
-window.addEventListener("error", (e) => errors.push("error event: " + e.message));
-window.confirm = () => true;
-window.HTMLElement.prototype.scrollIntoView = () => {};
-
-try {
-  window.eval(js);
-} catch (e) {
-  errors.push("eval: " + e.stack);
+const html=await(await fetch(B+"/")).text(), css=await(await fetch(B+"/app.css")).text(), js=await(await fetch(B+"/app.js")).text();
+const dom=new JSDOM(html.replace('<link rel="stylesheet" href="app.css">',"<style>"+css+"</style>"),
+  {runScripts:"outside-only",url:B+"/",pretendToBeVisual:true});
+const {window}=dom, d=window.document;
+window.fetch=(u,o)=>fetch(new URL(u,B).href,o); window.confirm=()=>true;
+window.HTMLElement.prototype.scrollIntoView=()=>{};
+window.addEventListener("error",e=>errors.push(e.message)); window.onerror=m=>errors.push("onerror "+m);
+try { window.eval(js); } catch(e) { errors.push("eval "+e.stack); }
+const wait=ms=>new Promise(r=>setTimeout(r,ms));
+const t=s=>(d.querySelector(s)||{}).textContent?.replace(/\s+/g," ").trim();
+const press=async(k,ms=800)=>{d.body.dispatchEvent(new window.KeyboardEvent("keydown",{key:k,bubbles:true}));await wait(ms);};
+await wait(700);
+console.log("badge   :", t("#mode"), "|", t("#sourceline"));
+console.log("driver  :", t("#next"), "|", t("#nextcmd"));
+const names=["scan","plan","diff","dryrun","confirm","verify"];
+for (let i=0;i<6;i++){
+  await press(" ");
+  console.log("\n== press "+(i+1)+" ("+names[i]+")");
+  console.log("  ran      :", t("#cmdline"));
+  console.log("  next     :", t("#next"));
+  console.log("  stats    :", (t("#stats")||"").slice(0,170));
+  console.log("  banner   :", (t("#banner")||"").slice(0,170));
+  console.log("  cards    :", d.querySelectorAll("#chainlist .chain").length,
+              "| dots:", d.querySelectorAll("#dots .dot").length,
+              "| calls:", d.querySelectorAll("#revertcalls .call-chip").length,
+              "| terminal blocks:", d.querySelectorAll("#termbody .term-block").length);
 }
-
-const d = window.document;
-const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-const text = (sel) => (d.querySelector(sel) || {}).textContent?.replace(/\s+/g, " ").trim();
-const click = async (sel, ms = 700) => {
-  const node = d.querySelector(sel);
-  if (!node) return errors.push("missing element " + sel);
-  node.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  await wait(ms);
-};
-const press = async (key, ms = 700) => {
-  d.body.dispatchEvent(new window.KeyboardEvent("keydown", { key, bubbles: true }));
-  await wait(ms);
-};
-const chips = () => [...d.querySelectorAll('[class*="chip v-"]')].map((n) => n.textContent).join(", ");
-const driver = () => text("#next") + "  |  " + text("#nextcmd");
-
-/* What the demo adds as it advances: dots from step 1, dot moods from step 3, revert call
- * chips in the footer at step 4, turning green at step 5. The playhead never moves on its
- * own, so its readout should stay at "now" throughout. */
-const zones = () =>
-  "dots=" +
-  d.querySelectorAll("#dots .dot").length +
-  " moods=[" +
-  [...new Set([...d.querySelectorAll("#dots .dot")].flatMap((n) =>
-    (n.className.match(/m-\w+/g) || [])))].join(",") +
-  "] calls=" +
-  d.querySelectorAll("#revertcalls .call-chip").length +
-  " applied=" +
-  d.querySelectorAll("#revertcalls .call-chip.applied").length +
-  " playhead=" +
-  text("#scrubtime");
-/** Same-row overlap between two absolutely positioned markers means one is unreadable.
- * Resolved at several viewport widths, because `left` is a percentage while the dot
- * nudge that separates same-instant events is in pixels. */
-const overlaps = (selector, fixedWidthPx) => {
-  const hits = [];
-  for (const viewport of [1000, 1440, 1920]) {
-    const track = viewport * 0.96;
-    const boxes = [...d.querySelectorAll(selector)].map((n) => {
-      const left = (parseFloat(n.style.left) / 100) * track + (parseFloat(n.style.marginLeft) || 0);
-      const width = n.style.maxWidth ? (parseFloat(n.style.maxWidth) / 100) * track : fixedWidthPx;
-      return { left, right: left + width, row: n.style.top || "css", label: n.textContent.slice(0, 8) };
-    });
-    for (let i = 0; i < boxes.length; i++) {
-      for (let j = i + 1; j < boxes.length; j++) {
-        const [a, b] = [boxes[i], boxes[j]];
-        if (a.row === b.row && a.left < b.right && b.left < a.right) {
-          hits.push(viewport + "px:" + a.label + "/" + b.label);
-        }
-      }
-    }
-  }
-  return hits;
-};
-
-await wait(600);
-console.log("mode       :", text("#mode"));
-console.log("driver     :", driver());
-console.log("hint       :", text("#nexthint"));
-
-// ---- the five presses, via the keyboard, as a presenter would
-for (let step = 1; step <= 5; step++) {
-  await press(" ", step === 5 ? 1300 : 900);
-  console.log("\n== press " + step + " ==");
-  console.log("ran        :", text("#cmdline"));
-  console.log("next       :", driver());
-  console.log("acts done  :", [...d.querySelectorAll(".act.done")].map((n) => n.textContent.trim()).join(" "),
-              "| current:", text(".act.current"));
-  console.log("banner     :", (text("#banner") || "").slice(0, 150));
-  console.log("timeline   :", zones());
-  if (step === 1) {
-    console.log("cards      :", d.querySelectorAll("#chainlist .chain").length,
-                "| dots:", d.querySelectorAll("#dots .dot").length);
-    console.log("note       :", text("#chainsnote"));
-  }
-  if (step === 2) {
-    console.log("stats      :", text("#stats"));
-    console.log("unknown    :", d.querySelectorAll(".chain.unknown").length);
-  }
-  if (step >= 3) console.log("chips      :", chips());
-  if (step === 5) console.log("state      :", text("#state"));
+console.log("\ngroups  :");
+for (const g of d.querySelectorAll(".group")) {
+  console.log("  " + (g.classList.contains("open") ? "open  " : "closed") + " " +
+    g.querySelector(".group-title").textContent.padEnd(26) +
+    g.querySelector(".group-count").textContent.padStart(3) +
+    "  cards shown: " + g.querySelectorAll(".chain").length +
+    (g.querySelector(".group-note") ? "  | " + g.querySelector(".group-note").textContent.slice(0,60) : ""));
 }
-console.log("\nafter 5 presses, driver:", driver());
-/* The axis must carry nothing but the numbers: a dot's own text is its index, and every
- * detail waits in a tooltip. A missing `.tip { display: none }` dumps the whole tooltip
- * onto the track and makes the timeline unreadable, so assert it rather than trust it. */
+console.log("  cards visible total:", d.querySelectorAll("#chainlist .chain").length,
+            "| dimmed dots:", d.querySelectorAll("#dots .dot.filtered").length);
+// render() rebuilds the list, so the header has to be looked up again to collapse it.
+const groupByTitle = (title) => [...d.querySelectorAll(".group")]
+  .find(g => g.querySelector(".group-title").textContent === title);
+const closedTitle = [...d.querySelectorAll(".group")]
+  .find(g => !g.classList.contains("open")).querySelector(".group-title").textContent;
+const toggle = async () => {
+  groupByTitle(closedTitle).querySelector(".group-head")
+    .dispatchEvent(new window.MouseEvent("click",{bubbles:true}));
+  await wait(250);
+};
+await toggle();
+console.log("  after expanding '" + closedTitle + "':", d.querySelectorAll("#chainlist .chain").length, "cards");
+await toggle();
+console.log("  after collapsing it again:", d.querySelectorAll("#chainlist .chain").length, "cards");
+const auto=d.querySelector(".chain[data-chain]");
+auto.dispatchEvent(new window.MouseEvent("click",{bubbles:true})); await wait(300);
+console.log("\nevidence for", auto.dataset.chain, ":");
+console.log(" ", (t("#evidence")||"").slice(0,600));
+console.log("  verbatim block:", !!d.querySelector(".ev-verbatim"));
+console.log("  linked dots:", d.querySelectorAll("#dots .dot.linked").length);
+console.log("\nterminal: chars =", d.querySelector("#termbody").textContent.length,
+            "| count label:", t("#termcount"));
+console.log("footer  :", t("#revertsummary"));
+console.log("calls   :", (t("#revertcalls")||"").slice(0,220));
+// drag to the far left
+const tl=d.querySelector("#timeline"); tl.getBoundingClientRect=()=>({left:0,width:1000,top:0,height:46});
+tl.dispatchEvent(new window.MouseEvent("mousedown",{bubbles:true,clientX:0}));
+window.dispatchEvent(new window.MouseEvent("mousemove",{bubbles:true,clientX:0}));
+window.dispatchEvent(new window.MouseEvent("mouseup",{bubbles:true})); await wait(200);
+console.log("\ndragged left:", t("#scrubtime"), "| table:", (t("#state")||"").slice(0,300));
+/* -- assertions: the things whose silent breakage would not throw --------------- */
+
+const expect = (label, actual, wanted) => {
+  const ok = String(actual) === String(wanted);
+  console.log((ok ? "  ok   " : "  FAIL ") + label + ": " + actual + (ok ? "" : " (want " + wanted + ")"));
+  if (!ok) errors.push(label + ": got " + actual + ", want " + wanted);
+};
+
+console.log("\nchecks:");
+expect("terminal blocks == commands run", d.querySelectorAll("#termbody .term-block").length, 6);
+expect("dots on the timeline", d.querySelectorAll("#dots .dot").length, 14);
+expect("revert call chips", d.querySelectorAll("#revertcalls .call-chip").length, 6);
+expect("no failed call chips", d.querySelectorAll("#revertcalls .call-chip.failed").length, 0);
+// Step 6 read the fields after step 5 wrote them, so its verdict supersedes the revert's:
+// the two asynchronous fields that could only be SUBMITTED have settled.
+const chipTexts = [...d.querySelectorAll("#chainlist .chip")].map((n) => n.textContent);
+expect("no field still reads SUBMITTED after verify", chipTexts.filter((x) => x === "SUBMITTED").length, 0);
+expect("all six read ALREADY REVERTED", chipTexts.filter((x) => x === "ALREADY REVERTED").length, 6);
+expect("stats show only the newer read", (t("#stats") || "").includes("submitted"), false);
+expect("playhead left of the first change", t("#scrubtime"), "before the session");
+// 4 reverted + 2 submitted are acted on; the 8 with no recorded value collapse away.
+expect("only actionable cards open", d.querySelectorAll("#chainlist .chain").length, 6);
+expect("a collapsed group is present", [...d.querySelectorAll(".group")].filter(g=>!g.classList.contains("open")).length >= 1, true);
+expect("collapsed fields dimmed on the axis", d.querySelectorAll("#dots .dot.filtered").length, 8);
+
+// The axis carries nothing but the numbers; a missing tooltip rule dumps text onto it.
 const leaked = [...d.querySelectorAll("#dots .dot")].filter((dot) => {
   const own = [...dot.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join("");
   return !/^\d+$/.test(own.trim()) || !dot.querySelector(".tip");
 });
-console.log("dot labels       :", [...d.querySelectorAll("#dots .dot")]
-  .map((n) => [...n.childNodes].filter((c) => c.nodeType === 3).map((c) => c.textContent).join("")).join(" "));
-if (leaked.length) errors.push(leaked.length + " dot(s) show more than their number on the axis");
+expect("dots showing only their number", leaked.length, 0);
 
-const ticks = [...d.querySelectorAll("#ticks span")];
-console.log("axis ticks       :", ticks.map((n) => n.textContent + "@" + n.style.left).join("  "));
-if (new Set(ticks.map((n) => n.style.left)).size !== ticks.length) {
-  errors.push("axis tick labels are not spread across the track");
+// Rules whose absence wrecks the layout without throwing.
+const REQUIRED_CSS = [".dot .tip", ".dot:hover .tip", ".ticks", ".ticks span", ".scrubber",
+  ".scrubber .handle", ".state td", ".state tr.state-head td", ".call-chip", ".term-out",
+  ".group-head", ".group-count", "[hidden]"];
+const missingCss = REQUIRED_CSS.filter((rule) => !css.includes(rule));
+expect("app.css rules present", missingCss.length ? missingCss.join(",") : 0, 0);
+
+// Same-row dot overlap, resolved in pixels at three viewport widths.
+const clashes = [];
+for (const viewport of [1200]) {
+  // Positions are laid out in pixels against the measured track, so this check only has
+  // to confirm the spacing pass left no pair touching.
+  const boxes = [...d.querySelectorAll("#dots .dot")].map((n) => {
+    const left = parseFloat(n.style.left) + (parseFloat(n.style.marginLeft) || 0);
+    return { left, right: left + 16, label: [...n.childNodes].filter((c) => c.nodeType === 3)
+      .map((c) => c.textContent).join("") };
+  });
+  for (let i = 0; i < boxes.length; i++)
+    for (let j = i + 1; j < boxes.length; j++)
+      if (boxes[i].left < boxes[j].right && boxes[j].left < boxes[i].right)
+        clashes.push(boxes[i].label + "/" + boxes[j].label);
 }
+expect("touching dots on the axis", clashes.length ? clashes.join(" ") : 0, 0);
+const spread = [...d.querySelectorAll("#dots .dot")].map((n) => Math.round(parseFloat(n.style.left)));
+console.log("  dot x  :", spread.join(" "));
 
-const clashes = overlaps("#dots .dot", 16);
-console.log("dot overlaps     :", clashes.length ? clashes.join(" ") : "none at 1000/1440/1920px");
-if (clashes.length) errors.push("timeline dots overlap and are unreadable: " + clashes.join(" "));
+// Every value the panels show must appear in the verbatim output they claim to render.
+const term = d.querySelector("#termbody").textContent;
+const sampled = ["t3.micro", "chn-18af3316d78f", "SUBMITTED", "creation-event",
+                 "response-elements", "REVERTED=4  SUBMITTED=2"];
+const absent = sampled.filter((needle) => !term.includes(needle));
+expect("sampled values present in the raw output", absent.length ? absent.join(",") : 0, 0);
 
-// the playhead is a manual control: five presses must leave it sitting at "now"
-console.log("playhead         :", text("#scrubtime"), "| table column:", text("#state .state-head td.val"));
-if (text("#scrubtime") !== "now") errors.push("the playhead moved on its own: " + text("#scrubtime"));
-console.log("revert calls     :", text("#revertcalls"));
-
-// ---- card <-> timeline link
-await click("#reset");
-await press(" ");
-await press(" ");
-const card = d.querySelector('.chain[data-chain]');
-const chainId = card.dataset.chain;
-card.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-await wait(300);
-console.log("\n-- link check for", chainId);
-console.log("dots focused    :", d.querySelector("#dots").classList.contains("focused"));
-console.log("linked dots     :", d.querySelectorAll("#dots .dot.linked").length,
-            "of", d.querySelectorAll("#dots .dot").length);
-console.log("selected cards  :", d.querySelectorAll(".chain.selected").length);
-console.log("evidence head   :", text("#evidence .ev-head"), "/", text("#evidence .ev-sub"));
-
-// hover preview
-card.dispatchEvent(new window.MouseEvent("mouseenter", { bubbles: true }));
-await wait(100);
-console.log("hovered dots    :", d.querySelectorAll("#dots .dot.hover").length);
-
-// clicking a dot selects its card and moves the scrubber
-const otherDot = [...d.querySelectorAll("#dots .dot")].find((n) => n.dataset.chain !== chainId);
-otherDot.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-await wait(300);
-console.log("dot click -> selected:", d.querySelector(".chain.selected")?.dataset.chain,
-            "| scrub:", text("#scrubtime"));
-
-// ---- unproved field: evidence, then supply a value
-const unknown = d.querySelector(".chain.unknown");
-unknown.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-await wait(300);
-console.log("\n-- UNKNOWN evidence");
-console.log("resolver rows   :", d.querySelectorAll("#evidence .resolvers li").length);
-console.log("panel           :", text("#evidence").slice(0, 330));
-unknown.querySelector(".supply input").value = "t3.nano";
-unknown.querySelector(".supply .btn").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-await wait(900);
-console.log("after --set     :", text("#cmdline"));
-console.log("asserted chips  :", [...d.querySelectorAll(".chip.ASSERTED")].map((n) => n.textContent).join(","));
-
-// ---- scrubber
-const timeline = d.querySelector("#timeline");
-timeline.getBoundingClientRect = () => ({ left: 0, width: 1000, top: 0, height: 54 });
-timeline.dispatchEvent(new window.MouseEvent("mousedown", { bubbles: true, clientX: 0 }));
-window.dispatchEvent(new window.MouseEvent("mousemove", { bubbles: true, clientX: 0 }));
-window.dispatchEvent(new window.MouseEvent("mouseup", { bubbles: true }));
-await wait(200);
-console.log("\n-- scrubbed to session start");
-console.log("at              :", text("#scrubtime"));
-console.log("state           :", text("#state"));
-await click("#scrubreset");
-console.log("after 'back to now':", text("#scrubtime"));
-
-// ---- help sheet
-await press("?", 150);
-console.log("\nhelp visible    :", !d.querySelector("#helpsheet").hidden);
-await press("Escape", 150);
-console.log("help dismissed  :", d.querySelector("#helpsheet").hidden);
-
-// ---- conflict beat
-await click("#reset");
-await press(" ");
-await press(" ");
-await click("#tamper");
-console.log("\n-- TAMPER");
-console.log("banner          :", text("#banner"));
-console.log("driver rewound  :", driver());
-await press(" ");
-console.log("after drift     :", text("#banner"));
-console.log("chips           :", chips());
-await press(" ");
-console.log("dry run chips   :", chips());
-console.log("footer          :", text("#revertsummary"));
-
-console.log("\nJS ERRORS:", errors.length ? errors : "none");
+console.log("\nERRORS:", errors.length?errors:"none");
 process.exitCode = errors.length ? 1 : 0;

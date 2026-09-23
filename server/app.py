@@ -24,26 +24,41 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from runner import CliError, DemoWorld, run  # noqa: E402
+from runner import CLI_ROOT, CliError, run  # noqa: E402
+from transcript import Transcript  # noqa: E402
 
 STATIC = Path(__file__).resolve().parents[1] / "web"
 DEFAULT_SINCE = "90m"
+#: The demo data: derived from the CLI's live-validation capture by demodata/derive.py, which
+#: documents exactly what it changed and why. The capture itself is never edited.
+DEFAULT_TRANSCRIPT = Path(__file__).resolve().parents[1] / "demodata" / "session.txt"
 
 
 class Session:
-    """Server-side state: the mode, the demo account, and the current plan file.
+    """Server-side state: the mode, the replayed transcript, and the current plan file.
 
-    ``plan`` and ``revert`` in the CLI communicate through a plan file on disk. The UI
-    keeps that contract rather than passing plans around in memory, so what `diff` and
-    `revert` read is exactly what a terminal user would have written with ``-o``.
+    In ``demo`` mode nothing runs: each route hands back one recorded command from a real
+    session, output and all. In ``live`` mode ``plan`` and ``revert`` communicate through a
+    plan file on disk, exactly as a terminal user's ``-o`` does.
     """
 
-    def __init__(self, mode: str, identity: Optional[str], region: Optional[str]) -> None:
+    def __init__(
+        self,
+        mode: str,
+        identity: Optional[str],
+        region: Optional[str],
+        transcript_path: Optional[str] = None,
+    ) -> None:
         self.mode = mode
         self.lock = threading.Lock()
-        self.demo: Optional[DemoWorld] = DemoWorld() if mode == "demo" else None
-        self.identity = identity or (self.demo.identity if self.demo else "")
-        self.region = region or (self.demo.region if self.demo else "")
+        self.transcript: Optional[Transcript] = None
+        if mode == "demo":
+            self.transcript = Transcript(Path(transcript_path or DEFAULT_TRANSCRIPT))
+        self.identity = identity or (self.transcript.identity if self.transcript else "")
+        self.region = region or (self.transcript.region if self.transcript else "")
+        #: demo mode has no live account to move, so `diff` after a confirmed revert
+        #: replays the recorded verification run instead of the first one.
+        self.applied = False
         self.plan_dir = tempfile.mkdtemp(prefix="rewind-ui-")
         self.plan_path = os.path.join(self.plan_dir, "plan.json")
 
@@ -57,20 +72,31 @@ class Session:
         return argv
 
     def call(self, argv: List[str]) -> Dict[str, Any]:
-        return run(argv, self.demo)
+        return run(argv)
+
+    def replay(self, step: str) -> Dict[str, Any]:
+        assert self.transcript is not None
+        return self.transcript.step(step)
 
     def has_plan(self) -> bool:
         return os.path.exists(self.plan_path)
 
     def describe(self) -> Dict[str, Any]:
+        recorded = None
+        if self.transcript:
+            recorded = {
+                "source": str(self.transcript.path),
+                "account": self.transcript.account,
+                "recordedAt": self.transcript.recorded_at,
+                "commands": [command for command, _ in self.transcript.commands],
+            }
         return {
             "mode": self.mode,
             "identity": self.identity,
             "region": self.region,
             "since": DEFAULT_SINCE,
             "planPath": self.plan_path if self.has_plan() else None,
-            "now": self.demo.now.isoformat() if self.demo else None,
-            "account": self.demo.state() if self.demo else None,
+            "recorded": recorded,
         }
 
 
@@ -132,7 +158,6 @@ class Handler(BaseHTTPRequestHandler):
                     "/api/revert": self._revert,
                     "/api/resolvers": self._resolvers,
                     "/api/reset": self._reset,
-                    "/api/tamper": self._tamper,
                 }.get(route)
                 if handler is None:
                     return self._json(404, {"error": "no such route: %s" % route})
@@ -149,13 +174,18 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as error:  # pragma: no cover - surfaced in the UI instead
             traceback.print_exc()
             return self._json(500, {"error": "%s: %s" % (type(error).__name__, error)})
-        result["account"] = session.demo.state() if session.demo else None
         self._json(200, result)
 
     def _scan(self, session: Session, body: Dict[str, Any]) -> Dict[str, Any]:
+        if session.transcript:
+            return session.replay("scan")
         return session.call(["scan"] + session.window_args(body))
 
     def _plan(self, session: Session, body: Dict[str, Any]) -> Dict[str, Any]:
+        if session.transcript:
+            # `--set` has no recording, so replay mode does not offer it rather than
+            # inventing an output for it.
+            return session.replay("plan")
         argv = ["plan"] + session.window_args(body) + ["-o", session.plan_path]
         for assignment in body.get("sets") or []:
             selector = str(assignment.get("selector") or "").strip()
@@ -167,6 +197,10 @@ class Handler(BaseHTTPRequestHandler):
         return session.call(argv)
 
     def _diff(self, session: Session, body: Dict[str, Any]) -> Dict[str, Any]:
+        if session.transcript:
+            # After the confirmed revert, the recorded session re-ran `diff` to verify it;
+            # that is the run to show, because the account has moved.
+            return session.replay("verify" if session.applied else "diff")
         if not session.has_plan():
             raise CliError(2, "no plan yet: run plan first", ["diff"])
         argv = ["diff", session.plan_path]
@@ -175,6 +209,10 @@ class Handler(BaseHTTPRequestHandler):
         return session.call(argv)
 
     def _revert(self, session: Session, body: Dict[str, Any]) -> Dict[str, Any]:
+        if session.transcript:
+            confirmed = bool(body.get("confirm"))
+            session.applied = session.applied or confirmed
+            return session.replay("applied" if confirmed else "dryRun")
         if not session.has_plan():
             raise CliError(2, "no plan yet: run plan first", ["revert"])
         argv = ["revert", session.plan_path]
@@ -182,35 +220,20 @@ class Handler(BaseHTTPRequestHandler):
             argv.append("--confirm")
         for chain_id in body.get("only") or []:
             argv += ["--only", str(chain_id)]
-        if session.demo is not None:
-            # The fake RDS instance settles instantly; skipping the waiter keeps the demo
-            # from blocking on a poll loop that has nothing to poll.
-            argv.append("--no-wait")
         return session.call(argv)
 
     def _resolvers(self, session: Session, body: Dict[str, Any]) -> Dict[str, Any]:
+        if session.transcript:
+            raise CliError(2, "`resolvers` is not part of the recorded session", ["resolvers"])
         return session.call(["resolvers"])
 
-    def _tamper(self, session: Session, body: Dict[str, Any]) -> Dict[str, Any]:
-        if session.demo is None:
-            raise CliError(2, "only the demo account can be tampered with", ["tamper"])
-        changed = session.demo.tamper()
-        return {
-            "argv": [
-                "# someone else: aws ec2 modify-instance-attribute --instance-id %s "
-                "--instance-type %s" % (changed["resource"], changed["value"])
-            ],
-            "exitCode": 0,
-            "payload": changed,
-        }
-
     def _reset(self, session: Session, body: Dict[str, Any]) -> Dict[str, Any]:
-        if session.demo is None:
+        if session.transcript is None:
             raise CliError(2, "reset is only available in demo mode", ["reset"])
-        session.demo.reset()
+        session.applied = False
         if session.has_plan():
             os.remove(session.plan_path)
-        return {"argv": ["# demo account reset"], "exitCode": 0, "payload": None}
+        return {"argv": ["# replay rewound to the start"], "exitCode": 0, "payload": None}
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -219,22 +242,30 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--mode",
         choices=["demo", "live"],
         default="demo",
-        help="demo: a sanitized CloudTrail fixture and an in-memory fake account, no AWS "
-        "call is possible. live: the ambient AWS configuration, like the rewind command.",
+        help="demo: replay a recorded real session; nothing runs and no AWS call is "
+        "possible. live: the ambient AWS configuration, like the rewind command.",
     )
     parser.add_argument("--identity", help="default identity to prefill")
     parser.add_argument("--region", help="default region to prefill")
+    parser.add_argument(
+        "--transcript",
+        metavar="FILE",
+        help="the recorded session demo mode replays (default: the CLI's live-validation log)",
+    )
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--host", default="127.0.0.1")
     args = parser.parse_args(argv)
 
-    Handler.session = Session(args.mode, args.identity, args.region)
+    Handler.session = Session(args.mode, args.identity, args.region, args.transcript)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     banner = "rewind-ui [%s]  http://%s:%d" % (args.mode, args.host, args.port)
     sys.stderr.write("\n%s\n%s\n\n" % (banner, "-" * len(banner)))
     if args.mode == "demo":
+        recorded = Handler.session.transcript
         sys.stderr.write(
-            "demo mode: fixture events, in-memory account. No AWS credentials are used.\n\n"
+            "demo mode: replaying %s\n  %d recorded rewind command(s), account %s. "
+            "Nothing runs and no credentials are used.\n\n"
+            % (recorded.path.name, len(recorded.commands), recorded.account)
         )
     try:
         server.serve_forever()
