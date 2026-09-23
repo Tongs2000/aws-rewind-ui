@@ -1,7 +1,8 @@
-/* End-to-end UI test: drives the real page against a running server in jsdom.
+/* End-to-end UI test: drives the real page in jsdom, against either transport.
  *
  *   cd /tmp && mkdir -p rwtest && cd rwtest && npm i jsdom
- *   cp <repo>/dev/smoke.mjs . && node smoke.mjs        # server must be running
+ *   cp <repo>/dev/smoke.mjs . && node smoke.mjs        # ./run.sh must be running
+ *   REWIND_UI=https://user.github.io/aws-rewind-ui node smoke.mjs    # the published page
  *
  * Walks the replay the way a presenter does - six presses - and checks what each step puts
  * on screen, the filter chips, the evidence panel, the terminal pane, and the playhead.
@@ -9,13 +10,20 @@
  */
 
 import { JSDOM } from "jsdom";
-const B = process.env.REWIND_UI || "http://127.0.0.1:8787";
+//: A trailing slash, so relative URLs resolve inside the site rather than beside it - a
+//: project GitHub Pages site is served from a subdirectory, not the domain root.
+const B = (process.env.REWIND_UI || "http://127.0.0.1:8787").replace(/\/*$/, "/");
 const errors = [];
-const html=await(await fetch(B+"/")).text(), css=await(await fetch(B+"/app.css")).text(), js=await(await fetch(B+"/app.js")).text();
+//: Importing jsdom leaves `fetch` handing back still-compressed bodies, so ask for none.
+//: GitHub Pages gzips; a local `http.server` does not, which is why this only bites on the
+//: deployed site.
+const get = (u, o = {}) =>
+  fetch(new URL(u, B).href, { ...o, headers: { "accept-encoding": "identity", ...(o.headers || {}) } });
+const html=await(await get("")).text(), css=await(await get("app.css")).text(), js=await(await get("app.js")).text();
 const dom=new JSDOM(html.replace('<link rel="stylesheet" href="app.css">',"<style>"+css+"</style>"),
-  {runScripts:"outside-only",url:B+"/",pretendToBeVisual:true});
+  {runScripts:"outside-only",url:B,pretendToBeVisual:true});
 const {window}=dom, d=window.document;
-window.fetch=(u,o)=>fetch(new URL(u,B).href,o); window.confirm=()=>true;
+window.fetch=(u,o)=>get(u,o); window.confirm=()=>true;
 window.HTMLElement.prototype.scrollIntoView=()=>{};
 window.addEventListener("error",e=>errors.push(e.message)); window.onerror=m=>errors.push("onerror "+m);
 try { window.eval(js); } catch(e) { errors.push("eval "+e.stack); }
