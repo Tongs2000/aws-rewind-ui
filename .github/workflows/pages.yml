@@ -31,7 +31,11 @@ jobs:
           python-version: "3.11"
       - name: Build the demo bundle
         run: python3 demodata/bundle.py
+      # `enablement` turns Pages on if it is off, so a fresh clone of this repo deploys on
+      # its first push instead of failing until someone visits the settings page.
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: web
