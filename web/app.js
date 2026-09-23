@@ -36,16 +36,81 @@ const state = {
 
 // -- api ---------------------------------------------------------------------
 
+/* Two transports, one surface.
+ *
+ * With `server/app.py` in front of the page, `/api/*` is a real POST - that is the only way
+ * live mode can work, because only the server can run the CLI. Served as plain files, there
+ * is no server to POST to, so the recorded session is read from `web/demo.json` instead and
+ * answered in the page. The payloads are identical: the bundle is what `server/transcript.py`
+ * produced, baked at build time by `demodata/bundle.py`.
+ *
+ * Demo mode has exactly one piece of state - whether the confirmed revert has run - so the
+ * static transport is a boolean and a lookup, not a reimplementation of anything.
+ */
+const backend = {
+  kind: null, // "server" | "static"
+  bundle: null,
+  applied: false,
+
+  /** Pick a transport and return the session description. */
+  async open() {
+    try {
+      const response = await fetch("/api/session");
+      if (response.ok) {
+        this.kind = "server";
+        return await response.json();
+      }
+    } catch (error) {
+      /* no server: fall through to the baked bundle */
+    }
+    const response = await fetch("demo.json");
+    if (!response.ok) throw new Error("demo.json is missing (run demodata/bundle.py)");
+    this.kind = "static";
+    this.bundle = await response.json();
+    return this.bundle.session;
+  },
+
+  async post(route, body) {
+    if (this.kind === "server") {
+      const response = await fetch(route, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}),
+      });
+      return { ok: response.ok, data: await response.json() };
+    }
+    return { ok: true, data: this.replay(route, body || {}) };
+  },
+
+  /** The static transport: the same six recorded commands the server hands back. */
+  replay(route, body) {
+    const steps = this.bundle.steps;
+    switch (route) {
+      case "/api/scan":
+        return steps.scan;
+      case "/api/plan":
+        return steps.plan;
+      case "/api/diff":
+        // After the confirmed revert the recorded session re-ran `diff` to verify it; that
+        // is the run to show, because the account has moved.
+        return this.applied ? steps.verify : steps.diff;
+      case "/api/revert":
+        if (body.confirm) this.applied = true;
+        return body.confirm ? steps.applied : steps.dryRun;
+      case "/api/reset":
+        this.applied = false;
+        return { argv: ["# replay rewound to the start"], exitCode: 0, payload: null };
+      default:
+        return { argv: [], exitCode: 2, error: "not part of the recorded session: " + route };
+    }
+  },
+};
+
 async function call(route, body) {
   $("#cmdstatus").textContent = "running…";
-  let response, data;
+  let ok, data;
   try {
-    response = await fetch(route, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body || {}),
-    });
-    data = await response.json();
+    ({ ok, data } = await backend.post(route, body));
   } catch (error) {
     $("#cmdstatus").textContent = "";
     banner("could not reach the server: " + error.message, true);
@@ -53,7 +118,7 @@ async function call(route, body) {
   }
   const command = (data.argv || []).join(" ");
   if (command) $("#cmdline").textContent = "$ " + command;
-  if (!response.ok) {
+  if (!ok || data.error) {
     $("#cmdstatus").textContent = "exit " + (data.exitCode ?? "?");
     banner(data.error || "the command failed", true);
     throw new Error(data.error || "command failed");
@@ -1086,13 +1151,13 @@ function renderRevertCalls() {
 // -- boot --------------------------------------------------------------------
 
 async function boot() {
-  const session = await (await fetch("/api/session")).json();
+  const session = await backend.open();
   state.mode = session.mode;
   state.recorded = session.recorded;
   if (session.mode === "demo") {
     // A refresh is how a presenter starts over, so the replay must be at step 0 here no
     // matter what the previous visitor left behind on the server.
-    await fetch("/api/reset", { method: "POST", body: "{}" }).catch(() => {});
+    await backend.post("/api/reset", {}).catch(() => {});
   }
   $("#identity").value = session.identity || "";
   $("#region").value = session.region || "";

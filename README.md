@@ -3,7 +3,7 @@
 A web front end for [`rewind`](../aws-rewind-cli), built for a five-minute demo.
 
 It is a **client of the CLI**, not a second implementation. In demo mode it replays a
-transcript of six `rewind` commands run against AWS account `183248601967`, and every table,
+transcript of six `rewind` commands run against AWS account `111122223333`, and every table,
 value and event id on screen is read out of that run's own output. The terminal pane keeps
 that output verbatim, so anything on screen can be checked against it in one keystroke.
 
@@ -25,10 +25,26 @@ CLI package, and `src/rewind` is not touched.
 ./run.sh --mode live --identity perf-agent --region us-west-1 --port 9000
 ```
 
+Or with no server at all, which is how the published page runs:
+
+```sh
+python3 demodata/bundle.py     # bake the transcript into web/demo.json
+python3 -m http.server -d web  # http://127.0.0.1:8000
+```
+
 **Demo mode** (the default) runs nothing. Each route hands back one recorded command: its
 argv, its exit code, its verbatim output, and that output parsed into the shapes the panels
 need. No credentials are read and no call leaves the machine. Reloading the page rewinds the
-replay to step 0, so a refresh is always a clean start.
+replay to step 0, so a refresh is always a clean start. It needs neither `boto3` nor the CLI
+beside it — a checkout of this repo alone serves the demo.
+
+**Static mode** is demo mode without the server. `demodata/bundle.py` runs the transcript
+parser once and writes `web/demo.json`; the page then answers its own `/api/*` calls from
+that bundle, holding the one piece of demo state (has the confirmed revert run?) in the page.
+The payloads are byte-identical to the server's, because they *are* the server's — the same
+`server/transcript.py` produced them. `web/` is then publishable anywhere static files are.
+`web/demo.json` is generated, so it is not committed; CI rebuilds it on every deploy and the
+published bundle cannot drift from `demodata/session.txt`.
 
 **Live mode** injects nothing: `rewind.cli.main` builds its own CloudTrail and boto3 clients
 exactly as the installed `rewind` command does, reading `--output json`. It needs `boto3`
@@ -143,9 +159,9 @@ recording, so the UI does not offer it.)
 
 The demo replays `demodata/session.txt`, which is **derived** from the CLI's live-validation
 capture (`aws-rewind-cli/docs/live-validation-2026-09-23-original.txt`). The capture is the
-record of what happened and is never edited; the derived copy exists so the demo shows one
-clean story instead of stopping to explain a terminated instance. `demodata/derive.py`
-regenerates it and is the authoritative statement of what differs:
+record of what happened; the derived copy exists so the demo shows one clean story instead of
+stopping to explain a terminated instance. `demodata/derive.py` regenerates it and is the
+authoritative statement of what differs:
 
 ```sh
 python3 demodata/derive.py     # rewrites demodata/session.txt and prints every count it changed
@@ -154,17 +170,17 @@ python3 demodata/derive.py     # rewrites demodata/session.txt and prints every 
 Resources that no longer exist are taken out of the demo, one row is relabelled, and every
 count is recomputed. Nothing else — no re-typing, no re-wording, no invented rows:
 
-1. **`i-0b76ba008411d9f3d` and `i-0857af4cd234c21e6` are removed from the demo.** Both were
+1. **`i-0ddd77778888ddd04` and `i-0bbb33334444bbb02` are removed from the demo.** Both were
    terminated mid-session, so their `instanceType` could never be restored: the real run
    ended with `IncorrectInstanceState` on each. Every row, evidence block and identity line
    that mentions either instance is dropped, as if they had never been in the session.
 2. **Four more fields go with them:** `RunInstances` and `TerminateInstances` on
-   `i-0ca6c9adf66978bf0` and `i-0a390555b40bfbc46`. Those two instances were created *and*
+   `i-0eee99990000eee05` and `i-0ccc55556666ccc03`. Those two instances were created *and*
    terminated inside the window and no other field of theirs was touched, so they are gone
    too. Other identities' calls against them (`UpdateInstanceInformation`,
    `RegisterManagedInstance`) stay — those happened and are not this identity's changes,
    which is why the scan table still lists 9 identities.
-3. **The `monitoring` revert on `i-05ca6019b718ef2c5` reads `SUBMITTED`, not `FAILED`.** The
+3. **The `monitoring` revert on `i-0aaa11112222aaa01` reads `SUBMITTED`, not `FAILED`.** The
    call was accepted and the field does read `disabled`; only the immediate read-back had not
    converged — which is exactly what `SUBMITTED` means everywhere else in this tool.
 4. **Every count derived from those rows is recomputed** — `changes`, `fields`, `revertible`,
@@ -178,6 +194,12 @@ That leaves 14 fields: 6 revertible (2 `instanceType`, 2 `monitoring`,
 
 Everything else, including every event id, timestamp and the CLI's own wording, is the
 original output byte for byte. `session.txt` opens with a header saying so.
+
+One thing is changed in the capture itself, before either file is published: the account id,
+the role id, the six instance ids and the host name in the shell prompt were replaced with
+placeholders of the same length, so the tables stay aligned. That is why the demo runs against
+account `111122223333` and an identity called `alice-DevAccount`. Every other byte — the
+values, the counts, the event ids, the timings, the failures — is the run.
 
 To present the unedited run instead — 3 `FAILED` and all — point the server at the capture:
 
@@ -256,6 +278,29 @@ cp /path/to/rewind-ui/dev/smoke.mjs .
 ./run.sh &                 # in the rewind-ui directory
 node smoke.mjs             # exits non-zero on any failure
 ```
+
+It takes a base URL, so the same suite covers both transports — point it at a plain file
+server to test the published page:
+
+```sh
+python3 demodata/bundle.py && python3 -m http.server -d web 8000 &
+REWIND_UI=http://127.0.0.1:8000 node smoke.mjs
+```
+
+---
+
+## Deploying
+
+`.github/workflows/pages.yml` publishes `web/` to GitHub Pages on every push to `main`: it
+runs `demodata/bundle.py` to build `web/demo.json`, then uploads the directory. Enable it once
+in **Settings → Pages → Source → GitHub Actions**.
+
+Only the demo ships. Live mode needs a server, credentials and the CLI, none of which exist on
+Pages, so the published page has no path to an AWS call — `backend.open()` finds no
+`/api/session`, falls back to the bundle, and every button replays a recording.
+
+Note that Pages on a **private** repository serves a private site, which needs a paid GitHub
+plan. On a free account the repository has to be public for the link to work for anyone else.
 
 ---
 

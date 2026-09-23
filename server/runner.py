@@ -8,7 +8,8 @@ clients from the ambient AWS configuration, exactly as the installed ``rewind`` 
 does.
 
 Demo mode does not come through this module at all: it replays a recorded real session,
-see ``transcript.py``.
+see ``transcript.py``. The CLI is therefore imported lazily, on the first live command, so
+that a checkout of this repo alone can serve the demo without the CLI beside it.
 """
 
 from __future__ import annotations
@@ -23,17 +24,26 @@ from typing import Any, Dict, List
 CLI_ROOT = Path(__file__).resolve().parents[2] / "aws-rewind-cli"
 
 
-def _ensure_importable() -> None:
-    """Put the CLI package on the path."""
+def _cli():
+    """The ``rewind.cli`` module, imported on first use.
+
+    Live mode needs the CLI package; demo mode does not, and this repo is published without
+    it. So the import happens here rather than at module scope, and says what is missing.
+    """
     for path in (CLI_ROOT / "src",):
         text = str(path)
         if text not in sys.path:
             sys.path.insert(0, text)
-
-
-_ensure_importable()
-
-from rewind import cli as cli_module  # noqa: E402
+    try:
+        from rewind import cli as cli_module
+    except ImportError as error:
+        raise CliError(
+            2,
+            "live mode needs the rewind CLI: expected it at %s (%s). Clone aws-rewind-cli "
+            "beside this repo, or use --mode demo." % (CLI_ROOT, error),
+            ["rewind"],
+        ) from error
+    return cli_module
 
 
 class CliError(RuntimeError):
@@ -49,6 +59,7 @@ def run(argv: List[str]) -> Dict[str, Any]:
     ``argv`` is returned as the caller passed it, because that string is what the UI
     displays and it must stay honest about what was executed.
     """
+    cli_module = _cli()
     full_argv = list(argv)
     if "--output" not in full_argv:
         full_argv += ["--output", "json"]
