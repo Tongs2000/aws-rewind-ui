@@ -1275,7 +1275,6 @@ async function boot() {
     if (mouse.target.id === "helpsheet") $("#helpsheet").hidden = true;
   });
 
-  $("#dryrun").addEventListener("click", () => doRevert(false).catch(() => {}));
   $("#confirm").addEventListener("click", () => confirmRevert().catch(() => {}));
   $("#termtoggle").addEventListener("click", toggleTerminal);
   $("#scrubreset").addEventListener("click", () => {

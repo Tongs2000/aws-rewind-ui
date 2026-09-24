@@ -96,7 +96,7 @@ The six small numbered buttons are the same steps, for when a question sends you
 │   [cards]                             │ the before-value, the     │
 │ ▸ skipped                8  (why)     │ chain, the revert calls,  │
 │                                       │ and the CLI's own words   │
-├ footer ─── revertible summary · the calls in order · [Dry run] [Confirm] ┤
+├ footer ─── revertible summary · the calls in order · [Confirm revert] ┤
 ```
 
 Clicking a card lights up that field's events on the timeline and fades the others;
