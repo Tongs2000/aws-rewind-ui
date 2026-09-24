@@ -444,7 +444,7 @@ kbd {
 
 .actions {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
-  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  display: flex; align-items: center; gap: 16px;
   padding: 12px 20px;
   background: rgba(14,16,19,.93); backdrop-filter: blur(8px);
   border-top: 1px solid var(--line);
@@ -453,7 +453,6 @@ kbd {
 .revert-summary { font: 12.5px var(--mono); color: var(--ink-dim); }
 .revert-summary b { color: var(--ink); }
 .revert-summary .warn { color: var(--medium); }
-.revert-buttons { display: flex; gap: 8px; flex: none; }
 
 /* The revert as an ordered list of calls: this is where step 4 and step 5 show up. */
 .revert-calls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }

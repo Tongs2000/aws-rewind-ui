@@ -107,7 +107,7 @@ would overwrite their work. Only `diff` can tell "ready to revert" from that.
 │   [cards]                             │ the before-value, the     │
 │ ▸ skipped                8  (why)     │ chain, the revert calls,  │
 │                                       │ and the CLI's own words   │
-├ footer ─── revertible summary · the calls in order · [Confirm revert] ┤
+├ footer ─── revertible summary · the revert's calls in execution order ────┤
 ```
 
 Clicking a card lights up that field's events on the timeline and fades the others;

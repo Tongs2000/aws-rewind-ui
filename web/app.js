@@ -1172,7 +1172,6 @@ function renderActions() {
     if (failed) parts.push('<span class="bad">' + failed + " failed</span>");
   }
   $("#revertsummary").innerHTML = parts.join(" · ");
-  $("#confirm").disabled = !stats.revertible;
   renderRevertCalls();
 }
 
@@ -1282,7 +1281,6 @@ async function boot() {
     if (mouse.target.id === "helpsheet") $("#helpsheet").hidden = true;
   });
 
-  $("#confirm").addEventListener("click", () => confirmRevert().catch(() => {}));
   $("#termtoggle").addEventListener("click", toggleTerminal);
   $("#scrubreset").addEventListener("click", () => {
     state.scrubAt = null;

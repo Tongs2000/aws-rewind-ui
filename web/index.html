@@ -149,17 +149,14 @@
   </div>
 </div>
 
+<!-- Read-only: what the revert is and what it did. Running it is step 4 and step 5 in the
+     driver bar, so the footer does not carry a second way to trigger it. -->
 <footer class="actions" id="actions" hidden>
   <div class="revert-left">
     <div class="revert-summary" id="revertsummary"></div>
     <!-- The revert is a list of calls in execution order, not a moment in time, so it
          lives here rather than on the timeline. -->
     <div class="revert-calls" id="revertcalls"></div>
-  </div>
-  <div class="revert-buttons">
-    <!-- Only the mutating action lives here. The dry run is step 4 in the driver bar; a
-         second button for it made the footer read as a choice between two equals. -->
-    <button id="confirm" class="btn btn-danger">Confirm revert</button>
   </div>
 </footer>
 
