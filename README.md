@@ -78,9 +78,10 @@ steps already run stay on screen. In live mode it asks once, up front, before wr
 anything.
 
 The six small numbered buttons are the same steps, for when a question sends you back one.
-They are labelled with the command each one runs — `scan`, `plan`, `diff`, `revert`,
-`--confirm`, `diff again` — so the plain-language label on the big button and the `$ rewind …`
-line under it map onto the same six words. <kbd>t</kbd> opens the terminal pane, <kbd>?</kbd>
+They are labelled one word per step — `scan`, `plan`, `diff`, `dryrun`, `confirm`, `verify`.
+Four are command names; `dryrun` and `confirm` are the two modes of `revert`, and `verify` is
+`diff` run again after the writes. The `$ rewind …` line under the big button always shows the
+real command. <kbd>t</kbd> opens the terminal pane, <kbd>?</kbd>
 the help card.
 
 Steps 2 and 3 are the pair people conflate, and they look in opposite directions in time:
