@@ -163,13 +163,18 @@ const STEPS = [
   {
     key: "plan",
     label: "Resolve before-values",
-    hint: "For one identity: every field it touched, what each held beforehand, and the evidence for it.",
+    hint:
+      "Looks backwards: for one identity, every field it touched, what each held before it " +
+      "started, and the evidence for that value. Writes the plan file.",
     run: () => doPlan(),
   },
   {
     key: "diff",
-    label: "Check drift",
-    hint: "Read each field's live value now. Has anything moved since the plan was made?",
+    label: "Read live state",
+    hint:
+      "Looks at now: reads each field's live value and compares it with what the plan says " +
+      "the session left it at. Has anyone else touched it since? That is drift, and it is the " +
+      "only thing that can tell 'ready to revert' from 'somebody has been here'.",
     run: () => doDiff(),
   },
   {
@@ -187,7 +192,9 @@ const STEPS = [
   {
     key: "verify",
     label: "Verify",
-    hint: "Run diff once more: what actually landed, and what still needs a human.",
+    hint:
+      "The same live read again, after the writes: what actually landed, what settled since, " +
+      "and what still needs a human.",
     run: () => doDiff(),
   },
 ];

@@ -32,13 +32,15 @@
     <div id="nexthint" class="drive-hint">&mdash;</div>
     <div id="nextcmd" class="drive-cmd">&mdash;</div>
   </div>
+  <!-- Labelled with the command each step runs, so the plain-language label on the big
+       button and the `$ rewind …` line under it map onto the same six words. -->
   <div class="acts" id="acts">
-    <button class="btn act" data-act="scan"><b>1</b> Scan</button>
-    <button class="btn act" data-act="plan"><b>2</b> Resolve</button>
-    <button class="btn act" data-act="diff"><b>3</b> Drift</button>
-    <button class="btn act" data-act="dryrun"><b>4</b> Dry run</button>
-    <button class="btn act" data-act="confirm"><b>5</b> Confirm</button>
-    <button class="btn act" data-act="verify"><b>6</b> Verify</button>
+    <button class="btn act" data-act="scan"><b>1</b> scan</button>
+    <button class="btn act" data-act="plan"><b>2</b> plan</button>
+    <button class="btn act" data-act="diff"><b>3</b> diff</button>
+    <button class="btn act" data-act="dryrun"><b>4</b> revert</button>
+    <button class="btn act" data-act="confirm"><b>5</b> --confirm</button>
+    <button class="btn act" data-act="verify"><b>6</b> diff again</button>
   </div>
 </section>
 

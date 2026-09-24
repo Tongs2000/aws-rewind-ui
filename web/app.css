@@ -129,7 +129,7 @@ kbd {
 .query input:focus { outline: none; border-color: #3b4453; background: #101419; }
 
 .acts { display: flex; gap: 6px; flex: none; flex-wrap: wrap; }
-.acts .act { font-size: 12px; padding: 6px 10px; }
+.acts .act { font: 12px var(--mono); padding: 6px 10px; }
 
 .btn {
   font: 500 13px var(--sans); color: var(--ink);

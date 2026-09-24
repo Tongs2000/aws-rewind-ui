@@ -64,7 +64,7 @@ under it, the exact command that step replays.
 |---|---|---|
 | 1 | `rewind scan --since 30m` | 9 identities made a tracked change; the top one made 14 changes across 6 resources, 6 of them revertible. No before-values exist yet |
 | 2 | `rewind plan --identity … --explain` | all 14 fields, each with its before-value, confidence, capability and the resolver that proved it |
-| 3 | `rewind diff plan.json` | each field's live value now: 6 `REVERTIBLE`, 8 `UNCHECKABLE`, no drift |
+| 3 | `rewind diff plan.json` | each field's **live** value now, compared with what the session left it at: 6 `REVERTIBLE`, 8 `UNCHECKABLE`, no drift |
 | 4 | `rewind revert plan.json` | the 6 calls a revert would make, newest change first. Nothing is called |
 | 5 | `rewind revert --confirm` | 4 `REVERTED`, 2 `SUBMITTED`, 8 `SKIPPED` |
 | 6 | `rewind diff plan.json` | the verification run: 6 `ALREADY_REVERTED`, 8 `UNCHECKABLE` |
@@ -78,7 +78,17 @@ steps already run stay on screen. In live mode it asks once, up front, before wr
 anything.
 
 The six small numbered buttons are the same steps, for when a question sends you back one.
-<kbd>t</kbd> opens the terminal pane, <kbd>?</kbd> the help card.
+They are labelled with the command each one runs — `scan`, `plan`, `diff`, `revert`,
+`--confirm`, `diff again` — so the plain-language label on the big button and the `$ rewind …`
+line under it map onto the same six words. <kbd>t</kbd> opens the terminal pane, <kbd>?</kbd>
+the help card.
+
+Steps 2 and 3 are the pair people conflate, and they look in opposite directions in time:
+`plan` looks **backwards** — CloudTrail history and creation events, to work out what each
+field held before the session — while `diff` looks at **now**, reading each field live to ask
+whether anyone else has touched it since the plan was made. A field the plan wants to set back
+to `t3.micro` but that now reads `t3.xlarge` is drift: somebody has been here, and reverting
+would overwrite their work. Only `diff` can tell "ready to revert" from that.
 
 ### What is where on the page
 
